@@ -1,7 +1,7 @@
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "integration: marks tests as integration tests requiring live network access",
+    "integration: marks tests as integration tests (use a local mock Quran API server)",
 ]
 
 [tool.ruff]

@@ -142,6 +142,7 @@ class TestPostVerse:
 # ------------------------------------------------------------------ #
 
 @pytest.mark.integration
+@pytest.mark.usefixtures("patch_quran_url")
 class TestIntegration:
     def test_real_chapter_1_metadata(self):
         import quran_api
@@ -158,7 +159,7 @@ class TestIntegration:
         assert len(english) > 0
 
     def test_full_cycle_chapter_1(self, tmp_db):
-        """Full posting cycle using real Quran API, mocked X."""
+        """Full posting cycle using local Quran API server, mocked X."""
         with _patch_twitter(tweet_ids=("live_1", "live_2")):
             bot.post_verse(db_path=tmp_db)
 
