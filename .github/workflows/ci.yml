@@ -70,9 +70,7 @@ jobs:
     name: Integration tests
     runs-on: ubuntu-latest
     needs: test
-    # Skip on PRs from forks — they cannot access secrets and the live
-    # Quran API call is the only external dependency.
-    if: github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository
+    # No fork restriction — integration tests use a local mock server, not live network
 
     steps:
       - uses: actions/checkout@v4
