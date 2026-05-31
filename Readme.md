@@ -18,6 +18,24 @@ Edit `config.py` to change the schedule, tweet mode, or translation.
 
 ---
 
+## Resuming from a specific verse
+
+If you've already been posting elsewhere and want the bot to pick up from a
+particular point, seed the database before the first run:
+
+```bash
+# Resume after Al-Ankabut (The Spider) 29:60 — the default
+python seed_db.py
+
+# Resume after any verse, e.g. Al-Baqara 2:255
+python seed_db.py 2 256
+```
+
+The script creates the database and sets the next verse to post.  Run it
+**once**, before `docker compose up -d`.
+
+---
+
 ## Configuration (`config.py`)
 
 | Field | Default | Description |
