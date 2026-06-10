@@ -1,31 +1,57 @@
 """
 X (Twitter) API v2 client using tweepy.
 
-Reads credentials from environment variables:
-    API_KEY, API_SECRET, ACCESS_TOKEN, ACCESS_TOKEN_SECRET
+Credentials are loaded via :class:`secrets.Secrets` which reads the
+``API_KEY``, ``API_SECRET``, ``ACCESS_TOKEN``, and ``ACCESS_TOKEN_SECRET``
+environment variables.
 """
-import os
+from dataclasses import dataclass
 from typing import Optional
 
 import tweepy
 
+from secrets import Secrets
 
-def _make_client() -> tweepy.Client:
+MAX_TWEET_LENGTH = 280
+
+
+@dataclass
+class Tweet:
+    """Represents a single tweet: either text-only or a video (with optional caption)."""
+
+    text: str | None = None
+    video_path: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.text is None and self.video_path is None:
+            raise ValueError("Tweet must have either text or video_path")
+        if self.text is not None and len(self.text) > MAX_TWEET_LENGTH:
+            raise ValueError(
+                f"Tweet text exceeds {MAX_TWEET_LENGTH} characters "
+                f"({len(self.text)}): {self.text[:50]!r}…"
+            )
+
+
+def _make_client(secrets: Secrets | None = None) -> tweepy.Client:
+    if secrets is None:
+        secrets = Secrets.from_env()
     return tweepy.Client(
-        consumer_key=os.environ["API_KEY"],
-        consumer_secret=os.environ["API_SECRET"],
-        access_token=os.environ["ACCESS_TOKEN"],
-        access_token_secret=os.environ["ACCESS_TOKEN_SECRET"],
+        consumer_key=secrets.twitter_api_key,
+        consumer_secret=secrets.twitter_api_secret,
+        access_token=secrets.twitter_access_token,
+        access_token_secret=secrets.twitter_access_token_secret,
     )
 
 
-def _make_api() -> tweepy.API:
+def _make_api(secrets: Secrets | None = None) -> tweepy.API:
     """Create a tweepy v1.1 API client used for media (video) upload."""
+    if secrets is None:
+        secrets = Secrets.from_env()
     auth = tweepy.OAuth1UserHandler(
-        os.environ["API_KEY"],
-        os.environ["API_SECRET"],
-        os.environ["ACCESS_TOKEN"],
-        os.environ["ACCESS_TOKEN_SECRET"],
+        secrets.twitter_api_key,
+        secrets.twitter_api_secret,
+        secrets.twitter_access_token,
+        secrets.twitter_access_token_secret,
     )
     return tweepy.API(auth)
 
@@ -47,103 +73,42 @@ def upload_video(video_path: str, api: Optional[tweepy.API] = None) -> str:
 
 
 def post_thread(
-    arabic_text: str,
-    english_text: str,
-    chapter_name_arabic: str,
-    chapter_name_english: str,
-    verse_number: int,
-    max_length: int = 280,
-    mode: str = "thread",
-    client: Optional[tweepy.Client] = None,
-) -> list[str]:
-    """
-    Post a verse as a tweet (or thread).
-
-    In "thread" mode the Arabic tweet is posted first, then the English
-    translation is posted as a reply to it.
-    In "separate" mode both tweets are posted independently.
-
-    Returns a list of tweet IDs that were created.
-    """
-    if client is None:
-        client = _make_client()
-
-    arabic_tweet = _format_tweet(
-        arabic_text, chapter_name_arabic, verse_number, max_length
-    )
-    english_tweet = _format_tweet(
-        english_text, chapter_name_english, verse_number, max_length
-    )
-
-    tweet_ids: list[str] = []
-
-    # Post Arabic tweet
-    response = client.create_tweet(text=arabic_tweet)
-    arabic_id = str(response.data["id"])
-    tweet_ids.append(arabic_id)
-
-    # Post English tweet
-    reply_to = arabic_id if mode == "thread" else None
-    kwargs = {"text": english_tweet}
-    if reply_to:
-        kwargs["in_reply_to_tweet_id"] = reply_to
-    response = client.create_tweet(**kwargs)
-    tweet_ids.append(str(response.data["id"]))
-
-    return tweet_ids
-
-
-def post_video_thread(
-    video_path: str,
-    arabic_text: str,
-    english_text: str,
-    chapter_name_arabic: str,
-    chapter_name_english: str,
-    verse_start: int,
-    verse_end: int,
-    max_length: int = 280,
+    tweets: list[Tweet],
     mode: str = "thread",
     client: Optional[tweepy.Client] = None,
     api: Optional[tweepy.API] = None,
 ) -> list[str]:
     """
-    Post a ruku as a three-part thread: Arabic text → English text → video.
+    Post a list of :class:`Tweet` objects as a thread.
 
-    The Arabic tweet is posted first, the English translation follows as a
-    reply (thread mode) or independently (separate mode), and the recitation
-    video is uploaded and posted as the final tweet.
+    Each tweet may contain text, a video, or both.  In ``"thread"`` mode every
+    tweet after the first is posted as a reply to the previous one.  In
+    ``"separate"`` mode each tweet is posted independently.
 
-    Returns a list of tweet IDs created (three elements).
+    Returns the list of created tweet IDs in posting order.
     """
     if client is None:
         client = _make_client()
 
-    verse_label = f"{verse_start}-{verse_end}" if verse_start != verse_end else str(verse_start)
-    arabic_tweet = _format_tweet(arabic_text, chapter_name_arabic, verse_label, max_length)
-    english_tweet = _format_tweet(english_text, chapter_name_english, verse_label, max_length)
-
     tweet_ids: list[str] = []
+    prev_id: str | None = None
 
-    # 1. Post Arabic tweet
-    response = client.create_tweet(text=arabic_tweet)
-    arabic_id = str(response.data["id"])
-    tweet_ids.append(arabic_id)
+    for tweet in tweets:
+        kwargs: dict = {}
+        if prev_id and mode == "thread":
+            kwargs["in_reply_to_tweet_id"] = prev_id
 
-    # 2. Post English tweet
-    en_kwargs: dict = {"text": english_tweet}
-    if mode == "thread":
-        en_kwargs["in_reply_to_tweet_id"] = arabic_id
-    response = client.create_tweet(**en_kwargs)
-    english_id = str(response.data["id"])
-    tweet_ids.append(english_id)
+        if tweet.video_path:
+            media_id = upload_video(tweet.video_path, api)
+            kwargs["text"] = tweet.text or "\u200b"  # zero-width space filler
+            kwargs["media_ids"] = [media_id]
+        else:
+            kwargs["text"] = tweet.text
 
-    # 3. Upload and post video as the final reply
-    media_id = upload_video(video_path, api)
-    video_kwargs: dict = {"text": "\u200b", "media_ids": [media_id]}
-    if mode == "thread":
-        video_kwargs["in_reply_to_tweet_id"] = english_id
-    response = client.create_tweet(**video_kwargs)
-    tweet_ids.append(str(response.data["id"]))
+        response = client.create_tweet(**kwargs)
+        tweet_id = str(response.data["id"])
+        tweet_ids.append(tweet_id)
+        prev_id = tweet_id
 
     return tweet_ids
 

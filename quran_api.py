@@ -3,6 +3,8 @@ Quran.com API v4 client.
 
 Docs: https://api.quran.com/api/v4
 """
+from dataclasses import dataclass, field
+
 import requests
 
 BASE_URL = "https://api.quran.com/api/v4"
@@ -10,6 +12,21 @@ AUDIO_CDN_BASE = "https://verses.quran.com/"
 
 _session = requests.Session()
 _session.headers.update({"Accept": "application/json"})
+
+
+@dataclass
+class Verse:
+    """Represents a single Quran verse with text and optional audio data."""
+
+    verse_key: str            # e.g. "1:1"
+    chapter_number: int
+    verse_number: int
+    arabic: str
+    english: str
+    audio_url: str = ""
+    audio_segments: list = field(default_factory=list)
+    # audio_segments format: [[word_idx, start_ms, end_ms], ...]
+
 
 
 def get_chapter(chapter_number: int) -> dict:
@@ -84,13 +101,76 @@ def _strip_html(text: str) -> str:
     return re.sub(r"<[^>]+>", "", text).strip()
 
 
-def get_verse_audio_url(
-    chapter_number: int, verse_number: int, recitation_id: int = 7
-) -> str:
+def get_verses_by_ruku(
+    ruku_number: int,
+    translation_id: int = 20,
+    recitation_id: int = 7,
+) -> list[Verse]:
     """
-    Fetch the audio URL for a single verse.
+    Fetch all verses that belong to a given ruku in a single API call.
 
-    Returns a fully-qualified HTTPS URL pointing to the MP3 file.
+    Uses the ``/verses/by_ruku/{ruku_number}`` endpoint so that the caller
+    does not need to iterate verse-by-verse to discover ruku boundaries.
+
+    Parameters
+    ----------
+    ruku_number:
+        Global ruku number (1-558) as returned by the ``ruku_number`` field
+        in per-verse responses.
+    translation_id:
+        Quran.com translation ID (default 20 = Saheeh International).
+    recitation_id:
+        Recitation ID used to fetch audio URLs (default 7 = Abdul Basit).
+
+    Returns a :class:`Verse` list with ``arabic``, ``english``, ``audio_url``,
+    and ``audio_segments`` populated for each verse in ruku order.
+    Raises ``ValueError`` if no verses are found.
+    """
+    url = f"{BASE_URL}/verses/by_ruku/{ruku_number}"
+    params = {
+        "translations": translation_id,
+        "fields": "text_uthmani,verse_key",
+        "per_page": 50,
+    }
+    response = _session.get(url, params=params, timeout=15)
+    response.raise_for_status()
+    raw_verses = response.json().get("verses", [])
+    if not raw_verses:
+        raise ValueError(f"No verses found for ruku {ruku_number}")
+
+    verses: list[Verse] = []
+    for rv in raw_verses:
+        key = rv.get("verse_key", "")
+        parts = key.split(":")
+        ch_num = int(parts[0]) if len(parts) == 2 else 0
+        v_num = int(parts[1]) if len(parts) == 2 else 0
+        verse = Verse(
+            verse_key=key,
+            chapter_number=ch_num,
+            verse_number=v_num,
+            arabic=extract_arabic(rv),
+            english=extract_english(rv),
+        )
+        verses.append(verse)
+
+    # Enrich each verse with its audio URL and timing segments
+    for verse in verses:
+        audio = _get_verse_audio(verse.chapter_number, verse.verse_number, recitation_id)
+        verse.audio_url = audio["url"]
+        verse.audio_segments = audio.get("segments", [])
+
+    return verses
+
+
+def _get_verse_audio(
+    chapter_number: int,
+    verse_number: int,
+    recitation_id: int = 7,
+) -> dict:
+    """Return ``{"url": str, "segments": list}`` for a single verse's recitation.
+
+    ``segments`` is a list of ``[word_idx, start_ms, end_ms]`` triples as
+    returned by the API (may be empty if the API omits them).
     """
     url = f"{BASE_URL}/recitations/{recitation_id}/by_chapter/{chapter_number}"
     params = {"per_page": 1, "page": verse_number}
@@ -101,8 +181,22 @@ def get_verse_audio_url(
         raise ValueError(
             f"No audio found for chapter {chapter_number}, verse {verse_number}"
         )
-    raw_url = audio_files[0].get("url", "")
-    return _normalise_audio_url(raw_url)
+    af = audio_files[0]
+    return {
+        "url": _normalise_audio_url(af.get("url", "")),
+        "segments": af.get("segments", []),
+    }
+
+
+def get_verse_audio_url(
+    chapter_number: int, verse_number: int, recitation_id: int = 7
+) -> str:
+    """
+    Fetch the audio URL for a single verse.
+
+    Returns a fully-qualified HTTPS URL pointing to the MP3 file.
+    """
+    return _get_verse_audio(chapter_number, verse_number, recitation_id)["url"]
 
 
 def get_verses_audio_urls(
