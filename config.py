@@ -11,8 +11,8 @@ class BotConfig:
     # Scheduling                                                           #
     # ------------------------------------------------------------------ #
     # Cron expression: minute hour day-of-month month day-of-week
-    # Default: daily at 08:00 UTC
-    schedule_cron: str = "0 8 * * *"
+    # Default: 7 times a day at 8am, 10am, 12pm, 2pm, 4pm, 6pm, and 8pm UTC
+    schedule_cron: str = "0 8,10,12,14,16,18,20 * * *"
 
     # ------------------------------------------------------------------ #
     # Posting behaviour                                                    #
@@ -25,8 +25,8 @@ class BotConfig:
     max_tweet_length: int = 280
 
     # Translation ID used with the quran.com v4 API.
-    # 131 = Saheeh International (English)
-    translation_id: int = 131
+    # 20 = Saheeh International (English)
+    translation_id: int = 20
 
     # ------------------------------------------------------------------ #
     # Quran traversal                                                      #
