@@ -121,8 +121,8 @@ class TestPostVideoThread:
         api.media_upload.return_value = MagicMock(media_id=int(media_id))
         return api
 
-    def test_attaches_media_id_to_first_tweet(self):
-        client = self._make_client_with_ids("aaa", "bbb")
+    def test_arabic_tweet_has_no_video_attachment(self):
+        client = self._make_client_with_ids("aaa", "bbb", "ccc")
         api = self._make_api_with_media_id("9999")
         twitter_client.post_video_thread(
             video_path="/tmp/video.mp4",
@@ -136,10 +136,27 @@ class TestPostVideoThread:
             api=api,
         )
         first_call_kwargs = client.create_tweet.call_args_list[0][1]
-        assert first_call_kwargs.get("media_ids") == ["9999"]
+        assert "media_ids" not in first_call_kwargs
 
-    def test_thread_mode_reply_includes_in_reply_to(self):
-        client = self._make_client_with_ids("111", "222")
+    def test_attaches_media_id_to_video_tweet(self):
+        client = self._make_client_with_ids("aaa", "bbb", "ccc")
+        api = self._make_api_with_media_id("9999")
+        twitter_client.post_video_thread(
+            video_path="/tmp/video.mp4",
+            arabic_text="ar",
+            english_text="en",
+            chapter_name_arabic="الفاتحة",
+            chapter_name_english="The Opener",
+            verse_start=1,
+            verse_end=5,
+            client=client,
+            api=api,
+        )
+        third_call_kwargs = client.create_tweet.call_args_list[2][1]
+        assert third_call_kwargs.get("media_ids") == ["9999"]
+
+    def test_thread_mode_reply_chain(self):
+        client = self._make_client_with_ids("111", "222", "333")
         api = self._make_api_with_media_id()
         twitter_client.post_video_thread(
             video_path="/tmp/v.mp4",
@@ -153,11 +170,15 @@ class TestPostVideoThread:
             client=client,
             api=api,
         )
+        # English replies to Arabic
         second_call_kwargs = client.create_tweet.call_args_list[1][1]
         assert second_call_kwargs.get("in_reply_to_tweet_id") == "111"
+        # Video replies to English
+        third_call_kwargs = client.create_tweet.call_args_list[2][1]
+        assert third_call_kwargs.get("in_reply_to_tweet_id") == "222"
 
     def test_separate_mode_no_reply(self):
-        client = self._make_client_with_ids("333", "444")
+        client = self._make_client_with_ids("333", "444", "555")
         api = self._make_api_with_media_id()
         twitter_client.post_video_thread(
             video_path="/tmp/v.mp4",
@@ -173,9 +194,11 @@ class TestPostVideoThread:
         )
         second_call_kwargs = client.create_tweet.call_args_list[1][1]
         assert "in_reply_to_tweet_id" not in second_call_kwargs
+        third_call_kwargs = client.create_tweet.call_args_list[2][1]
+        assert "in_reply_to_tweet_id" not in third_call_kwargs
 
     def test_single_verse_label_has_no_dash(self):
-        client = self._make_client_with_ids("x1", "x2")
+        client = self._make_client_with_ids("x1", "x2", "x3")
         api = self._make_api_with_media_id()
         twitter_client.post_video_thread(
             video_path="/tmp/v.mp4",
@@ -193,7 +216,7 @@ class TestPostVideoThread:
         assert "-" not in first_tweet_text
 
     def test_range_verse_label_has_dash(self):
-        client = self._make_client_with_ids("y1", "y2")
+        client = self._make_client_with_ids("y1", "y2", "y3")
         api = self._make_api_with_media_id()
         twitter_client.post_video_thread(
             video_path="/tmp/v.mp4",
@@ -209,8 +232,8 @@ class TestPostVideoThread:
         first_tweet_text = client.create_tweet.call_args_list[0][1]["text"]
         assert ":1-5}" in first_tweet_text
 
-    def test_returns_both_tweet_ids(self):
-        client = self._make_client_with_ids("p1", "p2")
+    def test_returns_three_tweet_ids(self):
+        client = self._make_client_with_ids("p1", "p2", "p3")
         api = self._make_api_with_media_id()
         ids = twitter_client.post_video_thread(
             video_path="/tmp/v.mp4",
@@ -223,4 +246,4 @@ class TestPostVideoThread:
             client=client,
             api=api,
         )
-        assert ids == ["p1", "p2"]
+        assert ids == ["p1", "p2", "p3"]
