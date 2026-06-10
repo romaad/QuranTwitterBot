@@ -51,7 +51,7 @@ def _patch_twitter(tweet_ids=("111", "222")):
     return mock.patch("bot.twitter_client.post_thread", return_value=list(tweet_ids))
 
 
-def _patch_video_twitter(tweet_ids=("aaa", "bbb")):
+def _patch_video_twitter(tweet_ids=("aaa", "bbb", "ccc")):
     import unittest.mock as mock
     return mock.patch(
         "bot.twitter_client.post_video_thread", return_value=list(tweet_ids)
@@ -194,158 +194,6 @@ class TestIntegration:
 
 
 # ------------------------------------------------------------------ #
-# Tests for _collect_group_positions                                   #
-# ------------------------------------------------------------------ #
-
-class TestCollectGroupPositions:
-    def _chapter(self, verse_count):
-        return {"verses_count": verse_count}
-
-    def test_within_single_chapter(self):
-        cache = {1: self._chapter(7)}
-        positions = bot._collect_group_positions(1, 3, 3, cache)
-        assert positions == [(1, 3), (1, 4), (1, 5)]
-
-    def test_wraps_to_next_chapter(self):
-        cache = {1: self._chapter(7), 2: self._chapter(286)}
-        positions = bot._collect_group_positions(1, 6, 3, cache)
-        assert positions == [(1, 6), (1, 7), (2, 1)]
-
-    def test_wraps_from_chapter_114(self):
-        cache = {114: self._chapter(6), 1: self._chapter(7)}
-        positions = bot._collect_group_positions(114, 5, 3, cache)
-        # chapter 114 has 6 verses; verse 5, 6 then wraps to 1:1
-        assert positions[0] == (114, 5)
-        assert positions[1] == (114, 6)
-        assert positions[2] == (1, 1)
-
-    def test_populates_cache_lazily(self):
-        cache = {}
-        with patch("bot.quran_api.get_chapter", return_value=self._chapter(7)) as mock_ch:
-            bot._collect_group_positions(1, 1, 2, cache)
-        mock_ch.assert_called_once_with(1)
-        assert 1 in cache
-
-    def test_size_one_returns_single_element(self):
-        cache = {1: self._chapter(7)}
-        positions = bot._collect_group_positions(1, 4, 1, cache)
-        assert positions == [(1, 4)]
-
-
-# ------------------------------------------------------------------ #
-# Tests for post_verse_group                                           #
-# ------------------------------------------------------------------ #
-
-class TestPostVerseGroup:
-    def _build_video_noop(self, audio_urls, nature_video, output_path, **kwargs):
-        # Create a tiny fake video file so downstream code succeeds
-        with open(output_path, "wb") as fh:
-            fh.write(b"FAKEMP4")
-        return output_path
-
-    def test_success_advances_state_by_group_size(self, tmp_db):
-        with (
-            _patch_quran(),
-            _patch_video_twitter(),
-            patch("bot.video_maker.build_video", side_effect=self._build_video_noop),
-            patch("bot.config.group_size", 3),
-            patch("bot.config.enable_video", True),
-        ):
-            bot.post_verse_group(db_path=tmp_db)
-
-        with db.get_connection(tmp_db) as conn:
-            state = db.get_state(conn)
-        # Started at 1:1; group_size=3 → should be at 1:4
-        assert state["current_chapter"] == 1
-        assert state["current_verse"] == 4
-
-    def test_success_logs_history_row(self, tmp_db):
-        with (
-            _patch_quran(),
-            _patch_video_twitter(),
-            patch("bot.video_maker.build_video", side_effect=self._build_video_noop),
-            patch("bot.config.group_size", 2),
-        ):
-            bot.post_verse_group(db_path=tmp_db)
-
-        with db.get_connection(tmp_db) as conn:
-            history = db.get_history(conn)
-        assert len(history) == 1
-        assert history[0]["status"] == "success"
-        assert history[0]["chapter_number"] == 1
-        assert history[0]["verse_number"] == 1
-
-    def test_failure_does_not_advance_state(self, tmp_db):
-        with (
-            _patch_quran(),
-            patch(
-                "bot.video_maker.build_video",
-                side_effect=RuntimeError("ffmpeg missing"),
-            ),
-            patch("bot.config.group_size", 3),
-        ):
-            bot.post_verse_group(db_path=tmp_db)
-
-        with db.get_connection(tmp_db) as conn:
-            state = db.get_state(conn)
-            history = db.get_history(conn)
-
-        assert state["current_chapter"] == 1
-        assert state["current_verse"] == 1
-        assert history[0]["status"] == "failed"
-        assert "ffmpeg missing" in history[0]["error_message"]
-
-    def test_passes_video_dimensions_to_build_video(self, tmp_db):
-        """build_video must receive the configured width/height."""
-        captured: list[dict] = []
-
-        def fake_build(audio_urls, nature, output, width=0, height=0, **kw):
-            captured.append({"width": width, "height": height})
-            with open(output, "wb") as fh:
-                fh.write(b"MP4")
-            return output
-
-        with (
-            _patch_quran(),
-            _patch_video_twitter(),
-            patch("bot.video_maker.build_video", side_effect=fake_build),
-            patch("bot.config.group_size", 1),
-            patch("bot.config.video_width", 1080),
-            patch("bot.config.video_height", 1920),
-        ):
-            bot.post_verse_group(db_path=tmp_db)
-
-        assert captured[0] == {"width": 1080, "height": 1920}
-
-    def test_uses_pexels_when_api_key_set(self, tmp_db, monkeypatch):
-        """When PEXELS_API_KEY is in the environment the bot fetches from Pexels."""
-        monkeypatch.setenv("PEXELS_API_KEY", "fake_key")
-        fetched: list[str] = []
-
-        def fake_fetch(query, api_key, dest):
-            fetched.append(api_key)
-            with open(dest, "wb") as fh:
-                fh.write(b"NATURE")
-            return dest
-
-        def fake_build(audio_urls, nature, output, **kw):
-            with open(output, "wb") as fh:
-                fh.write(b"MP4")
-            return output
-
-        with (
-            _patch_quran(),
-            _patch_video_twitter(),
-            patch("bot.video_maker.fetch_nature_video", side_effect=fake_fetch),
-            patch("bot.video_maker.build_video", side_effect=fake_build),
-            patch("bot.config.group_size", 1),
-        ):
-            bot.post_verse_group(db_path=tmp_db)
-
-        assert fetched == ["fake_key"]
-
-
-# ------------------------------------------------------------------ #
 # Tests for _collect_ruku_positions                                    #
 # ------------------------------------------------------------------ #
 
@@ -472,4 +320,64 @@ class TestPostRukuGroup:
         assert state["current_chapter"] == 1
         assert state["current_verse"] == 1
         assert history[0]["status"] == "failed"
+
+    def test_uses_pexels_for_each_query_when_api_key_set(self, tmp_db, monkeypatch):
+        """When PEXELS_API_KEY is set, fetch_nature_video is called once per query."""
+        monkeypatch.setenv("PEXELS_API_KEY", "fake_key")
+        fetched_queries: list[str] = []
+
+        def fake_fetch(query, api_key, dest):
+            fetched_queries.append(query)
+            with open(dest, "wb") as fh:
+                fh.write(b"NATURE")
+            return dest
+
+        def fake_build(audio_urls, nature_paths, output, **kw):
+            with open(output, "wb") as fh:
+                fh.write(b"MP4")
+            return output
+
+        def fake_collect_ruku(ch, v, cache=None):
+            if cache is not None:
+                cache[1] = {"verses_count": 7}
+            return [(1, 1)]
+
+        with (
+            _patch_quran(),
+            _patch_video_twitter(),
+            patch("bot._collect_ruku_positions", side_effect=fake_collect_ruku),
+            patch("bot.video_maker.fetch_nature_video", side_effect=fake_fetch),
+            patch("bot.video_maker.build_video", side_effect=fake_build),
+        ):
+            bot.post_ruku_group(db_path=tmp_db)
+
+        # One call per query in config.nature_video_queries (default: nature, wildlife)
+        from config import config as cfg
+        assert fetched_queries == list(cfg.nature_video_queries)
+
+    def test_passes_list_of_paths_to_build_video(self, tmp_db, monkeypatch):
+        """build_video must receive a list of background video paths."""
+        monkeypatch.delenv("PEXELS_API_KEY", raising=False)
+        captured_paths: list = []
+
+        def fake_build(audio_urls, nature_paths, output, **kw):
+            captured_paths.append(nature_paths)
+            with open(output, "wb") as fh:
+                fh.write(b"MP4")
+            return output
+
+        def fake_collect_ruku(ch, v, cache=None):
+            if cache is not None:
+                cache[1] = {"verses_count": 7}
+            return [(1, 1)]
+
+        with (
+            _patch_quran(),
+            _patch_video_twitter(),
+            patch("bot._collect_ruku_positions", side_effect=fake_collect_ruku),
+            patch("bot.video_maker.build_video", side_effect=fake_build),
+        ):
+            bot.post_ruku_group(db_path=tmp_db)
+
+        assert isinstance(captured_paths[0], list)
 

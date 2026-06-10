@@ -78,7 +78,7 @@ class TestBuildVideo:
         ):
             video_maker.build_video(audio_urls, nature_video, output)
 
-        # Expect two ffmpeg calls: concat + overlay
+        # Expect two ffmpeg calls: concat + overlay (single clip → no xfade step)
         assert mock_ffmpeg.call_count == 2
         concat_args = mock_ffmpeg.call_args_list[0][0][0]
         overlay_args = mock_ffmpeg.call_args_list[1][0][0]
@@ -181,11 +181,12 @@ class TestBuildVideo:
 
         overlay_args = mock_ffmpeg.call_args_list[1][0][0]
         assert "-vf" in overlay_args
-        assert any("1080" in str(a) and "1920" in str(a) for a in overlay_args)
+        vf_value = overlay_args[overlay_args.index("-vf") + 1]
+        assert "1080" in vf_value and "1920" in vf_value
         assert "libx264" in overlay_args
 
-    def test_no_vf_filter_when_dimensions_zero(self, tmp_path):
-        """Default (width=0, height=0) must use -c:v copy without -vf."""
+    def test_vf_filter_includes_darkening_by_default(self, tmp_path):
+        """Default darken=0.15 must always add an eq brightness filter."""
         mock_response = MagicMock()
         mock_response.content = b"MP3"
         output = str(tmp_path / "out.mp4")
@@ -196,6 +197,25 @@ class TestBuildVideo:
         ):
             video_maker.build_video(
                 ["https://cdn.example.com/v1.mp3"], "nature.mp4", output
+            )
+
+        overlay_args = mock_ffmpeg.call_args_list[1][0][0]
+        assert "-vf" in overlay_args
+        vf_value = overlay_args[overlay_args.index("-vf") + 1]
+        assert "eq=brightness" in vf_value
+
+    def test_no_vf_filter_when_darken_zero_and_no_resize(self, tmp_path):
+        """With darken=0 and no resize, -c:v copy is used and -vf is absent."""
+        mock_response = MagicMock()
+        mock_response.content = b"MP3"
+        output = str(tmp_path / "out.mp4")
+
+        with (
+            patch("video_maker.requests.get", return_value=mock_response),
+            patch("video_maker._run_ffmpeg") as mock_ffmpeg,
+        ):
+            video_maker.build_video(
+                ["https://cdn.example.com/v1.mp3"], "nature.mp4", output, darken=0.0
             )
 
         overlay_args = mock_ffmpeg.call_args_list[1][0][0]
@@ -294,6 +314,72 @@ class TestFetchNatureVideo:
             video_maker.fetch_nature_video("nature", "MY_API_KEY", output)
 
         assert captured[0].get("Authorization") == "MY_API_KEY"
+
+    def test_sends_humans_zero_param(self, tmp_path):
+        """The search request must include humans=0 to exclude human subjects."""
+        output = str(tmp_path / "nature.mp4")
+        pexels_data = _pexels_response()
+        captured_params: list[dict] = []
+
+        def fake_get(url, params=None, **kwargs):
+            if "pexels.com/videos/search" in url:
+                captured_params.append(params or {})
+                return self._mock_search_response(pexels_data)
+            return self._mock_download_response()
+
+        with patch("video_maker.requests.get", side_effect=fake_get):
+            video_maker.fetch_nature_video("nature", "key", output)
+
+        assert captured_params[0].get("humans") == 0
+
+
+class TestBuildVideoMultiClip:
+    """Tests for multi-clip xfade background behaviour."""
+
+    def test_three_ffmpeg_calls_for_two_clips(self, tmp_path):
+        """Two background clips → concat audio, build xfade bg, overlay (3 calls)."""
+        clip1 = str(tmp_path / "clip1.mp4")
+        clip2 = str(tmp_path / "clip2.mp4")
+        for p in (clip1, clip2):
+            open(p, "wb").close()
+        output = str(tmp_path / "out.mp4")
+
+        mock_response = MagicMock()
+        mock_response.content = b"MP3"
+
+        with (
+            patch("video_maker.requests.get", return_value=mock_response),
+            patch("video_maker._run_ffmpeg") as mock_ffmpeg,
+            patch("video_maker._get_audio_duration", return_value=60.0),
+        ):
+            video_maker.build_video(["https://cdn.example.com/v1.mp3"], [clip1, clip2], output)
+
+        assert mock_ffmpeg.call_count == 3
+        xfade_args = mock_ffmpeg.call_args_list[1][0][0]
+        assert "filter_complex" in " ".join(xfade_args)
+        assert "xfade" in " ".join(xfade_args)
+
+    def test_xfade_background_uses_both_clip_paths(self, tmp_path):
+        """Each clip path must appear in the xfade ffmpeg call inputs."""
+        clip1 = str(tmp_path / "a.mp4")
+        clip2 = str(tmp_path / "b.mp4")
+        for p in (clip1, clip2):
+            open(p, "wb").close()
+        output = str(tmp_path / "out.mp4")
+
+        mock_response = MagicMock()
+        mock_response.content = b"MP3"
+
+        with (
+            patch("video_maker.requests.get", return_value=mock_response),
+            patch("video_maker._run_ffmpeg") as mock_ffmpeg,
+            patch("video_maker._get_audio_duration", return_value=30.0),
+        ):
+            video_maker.build_video(["https://cdn.example.com/v1.mp3"], [clip1, clip2], output)
+
+        xfade_args = mock_ffmpeg.call_args_list[1][0][0]
+        assert clip1 in xfade_args
+        assert clip2 in xfade_args
 
 
 class TestRunFfmpeg:

@@ -39,14 +39,6 @@ class BotConfig:
     # ------------------------------------------------------------------ #
     enable_video: bool = False
 
-    # Group verses by ruku (natural Quran section) instead of a fixed size.
-    # When True, each scheduled post covers exactly one ruku.
-    group_by_ruku: bool = False
-
-    # Number of consecutive verses bundled into one video post.
-    # Only used when group_by_ruku is False.
-    group_size: int = 5
-
     # Recitation ID used with the quran.com v4 API.
     # 7 = Abdul Basit Abdul Samad (Murattal)
     recitation_id: int = 7
@@ -55,14 +47,19 @@ class BotConfig:
     # Used as fallback when PEXELS_API_KEY is not set.
     nature_video_path: str = "assets/nature.mp4"
 
-    # Pexels search query used to auto-fetch a background nature video.
-    # The PEXELS_API_KEY environment variable must be set to enable this.
-    nature_video_query: str = "nature"
+    # Pexels search queries used to auto-fetch background nature videos.
+    # One video is fetched per query and they are mixed together with a fade
+    # transition.  The PEXELS_API_KEY environment variable must be set to
+    # enable auto-fetching; otherwise *nature_video_path* is used.
+    nature_video_queries: tuple = ("nature", "wildlife")
 
     # Output video dimensions for mobile portrait (9:16) aspect ratio.
     # Set both to 0 to skip the crop/scale step.
     video_width: int = 1080
     video_height: int = 1920
+
+    # How much to darken the background video (0.0 = no darkening, 1.0 = black).
+    video_darken: float = 0.15
 
     # ------------------------------------------------------------------ #
     # SQLite path                                                          #

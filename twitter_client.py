@@ -107,12 +107,13 @@ def post_video_thread(
     api: Optional[tweepy.API] = None,
 ) -> list[str]:
     """
-    Upload *video_path* and post a verse-group tweet (or thread).
+    Post a ruku as a three-part thread: Arabic text → English text → video.
 
-    The Arabic tweet carries the video attachment; the English translation
-    is posted as a reply (thread mode) or independently (separate mode).
+    The Arabic tweet is posted first, the English translation follows as a
+    reply (thread mode) or independently (separate mode), and the recitation
+    video is uploaded and posted as the final tweet.
 
-    Returns a list of tweet IDs created.
+    Returns a list of tweet IDs created (three elements).
     """
     if client is None:
         client = _make_client()
@@ -121,21 +122,27 @@ def post_video_thread(
     arabic_tweet = _format_tweet(arabic_text, chapter_name_arabic, verse_label, max_length)
     english_tweet = _format_tweet(english_text, chapter_name_english, verse_label, max_length)
 
-    media_id = upload_video(video_path, api)
-
     tweet_ids: list[str] = []
 
-    # Post Arabic tweet with video
-    response = client.create_tweet(text=arabic_tweet, media_ids=[media_id])
+    # 1. Post Arabic tweet
+    response = client.create_tweet(text=arabic_tweet)
     arabic_id = str(response.data["id"])
     tweet_ids.append(arabic_id)
 
-    # Post English tweet
-    reply_to = arabic_id if mode == "thread" else None
-    kwargs = {"text": english_tweet}
-    if reply_to:
-        kwargs["in_reply_to_tweet_id"] = reply_to
-    response = client.create_tweet(**kwargs)
+    # 2. Post English tweet
+    en_kwargs: dict = {"text": english_tweet}
+    if mode == "thread":
+        en_kwargs["in_reply_to_tweet_id"] = arabic_id
+    response = client.create_tweet(**en_kwargs)
+    english_id = str(response.data["id"])
+    tweet_ids.append(english_id)
+
+    # 3. Upload and post video as the final reply
+    media_id = upload_video(video_path, api)
+    video_kwargs: dict = {"text": "\u200b", "media_ids": [media_id]}
+    if mode == "thread":
+        video_kwargs["in_reply_to_tweet_id"] = english_id
+    response = client.create_tweet(**video_kwargs)
     tweet_ids.append(str(response.data["id"]))
 
     return tweet_ids
