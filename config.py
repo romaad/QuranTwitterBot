@@ -35,9 +35,19 @@ class BotConfig:
     num_chapters: int = 114
 
     # ------------------------------------------------------------------ #
-    # Video posts (Phase 4 — not yet implemented)                          #
+    # Video posts                                                          #
     # ------------------------------------------------------------------ #
     enable_video: bool = False
+
+    # Number of consecutive verses bundled into one video post.
+    group_size: int = 5
+
+    # Recitation ID used with the quran.com v4 API.
+    # 7 = Abdul Basit Abdul Samad (Murattal)
+    recitation_id: int = 7
+
+    # Path to the background nature video file (must exist when enable_video=True).
+    nature_video_path: str = "assets/nature.mp4"
 
     # ------------------------------------------------------------------ #
     # SQLite path                                                          #

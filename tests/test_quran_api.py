@@ -121,3 +121,84 @@ class TestChapterBoundary:
         )
         chapter = quran_api.get_chapter(114)
         assert chapter["id"] == 114
+
+
+AUDIO_PAYLOAD_CH1_V1 = {
+    "audio_files": [
+        {"verse_key": "1:1", "url": "audio/recitations/7/001001.mp3"}
+    ]
+}
+
+AUDIO_PAYLOAD_CH1_V2 = {
+    "audio_files": [
+        {"verse_key": "1:2", "url": "//audio.qurancdn.com/007002.mp3"}
+    ]
+}
+
+
+class TestGetVerseAudioUrl:
+    def test_returns_absolute_url_for_relative_path(self, mock_http):
+        mock_http.add(
+            resp_lib.GET,
+            f"{quran_api.BASE_URL}/recitations/7/by_chapter/1",
+            json=AUDIO_PAYLOAD_CH1_V1,
+            status=200,
+        )
+        url = quran_api.get_verse_audio_url(1, 1, recitation_id=7)
+        assert url.startswith("https://")
+        assert "001001.mp3" in url
+
+    def test_returns_absolute_url_for_protocol_relative(self, mock_http):
+        mock_http.add(
+            resp_lib.GET,
+            f"{quran_api.BASE_URL}/recitations/7/by_chapter/1",
+            json=AUDIO_PAYLOAD_CH1_V2,
+            status=200,
+        )
+        url = quran_api.get_verse_audio_url(1, 2, recitation_id=7)
+        assert url.startswith("https://audio.qurancdn.com/")
+
+    def test_raises_when_no_audio_files(self, mock_http):
+        mock_http.add(
+            resp_lib.GET,
+            f"{quran_api.BASE_URL}/recitations/7/by_chapter/1",
+            json={"audio_files": []},
+            status=200,
+        )
+        with pytest.raises(ValueError, match="No audio found"):
+            quran_api.get_verse_audio_url(1, 1, recitation_id=7)
+
+
+class TestGetVersesAudioUrls:
+    def test_returns_list_of_urls(self, mock_http):
+        mock_http.add(
+            resp_lib.GET,
+            f"{quran_api.BASE_URL}/recitations/7/by_chapter/1",
+            json=AUDIO_PAYLOAD_CH1_V1,
+            status=200,
+        )
+        mock_http.add(
+            resp_lib.GET,
+            f"{quran_api.BASE_URL}/recitations/7/by_chapter/1",
+            json=AUDIO_PAYLOAD_CH1_V2,
+            status=200,
+        )
+        urls = quran_api.get_verses_audio_urls([(1, 1), (1, 2)], recitation_id=7)
+        assert len(urls) == 2
+        assert all(u.startswith("https://") for u in urls)
+
+
+class TestNormaliseAudioUrl:
+    def test_keeps_absolute_https(self):
+        url = "https://cdn.example.com/audio.mp3"
+        assert quran_api._normalise_audio_url(url) == url
+
+    def test_prefixes_protocol_relative(self):
+        url = "//cdn.example.com/audio.mp3"
+        assert quran_api._normalise_audio_url(url) == "https://cdn.example.com/audio.mp3"
+
+    def test_prepends_cdn_base_for_relative_path(self):
+        url = "audio/recitations/7/001001.mp3"
+        result = quran_api._normalise_audio_url(url)
+        assert result == quran_api.AUDIO_CDN_BASE + url
+

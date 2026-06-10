@@ -5,7 +5,7 @@ Unit tests mock both quran_api and twitter_client.
 Integration tests (marked @pytest.mark.integration) hit the real Quran API
 but always mock the X API.
 """
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -38,12 +38,22 @@ def _patch_quran(chapter=MOCK_CHAPTER, verse=MOCK_VERSE):
         get_verse=mock.MagicMock(return_value=verse),
         extract_arabic=mock.MagicMock(return_value="بِسْمِ ٱللَّهِ"),
         extract_english=mock.MagicMock(return_value="In the name of Allah"),
+        get_verses_audio_urls=mock.MagicMock(
+            return_value=["https://cdn.example.com/verse.mp3"]
+        ),
     )
 
 
 def _patch_twitter(tweet_ids=("111", "222")):
     import unittest.mock as mock
     return mock.patch("bot.twitter_client.post_thread", return_value=list(tweet_ids))
+
+
+def _patch_video_twitter(tweet_ids=("aaa", "bbb")):
+    import unittest.mock as mock
+    return mock.patch(
+        "bot.twitter_client.post_video_thread", return_value=list(tweet_ids)
+    )
 
 
 # ------------------------------------------------------------------ #
@@ -179,3 +189,134 @@ class TestIntegration:
         import quran_api
         verse = quran_api.get_verse(3, 1)
         assert quran_api.extract_arabic(verse)
+
+
+# ------------------------------------------------------------------ #
+# Tests for _collect_group_positions                                   #
+# ------------------------------------------------------------------ #
+
+class TestCollectGroupPositions:
+    def _chapter(self, verse_count):
+        return {"verses_count": verse_count}
+
+    def test_within_single_chapter(self):
+        cache = {1: self._chapter(7)}
+        positions = bot._collect_group_positions(1, 3, 3, cache)
+        assert positions == [(1, 3), (1, 4), (1, 5)]
+
+    def test_wraps_to_next_chapter(self):
+        cache = {1: self._chapter(7), 2: self._chapter(286)}
+        positions = bot._collect_group_positions(1, 6, 3, cache)
+        assert positions == [(1, 6), (1, 7), (2, 1)]
+
+    def test_wraps_from_chapter_114(self):
+        cache = {114: self._chapter(6), 1: self._chapter(7)}
+        positions = bot._collect_group_positions(114, 5, 3, cache)
+        # chapter 114 has 6 verses; verse 5, 6 then wraps to 1:1
+        assert positions[0] == (114, 5)
+        assert positions[1] == (114, 6)
+        assert positions[2] == (1, 1)
+
+    def test_populates_cache_lazily(self):
+        cache = {}
+        with patch("bot.quran_api.get_chapter", return_value=self._chapter(7)) as mock_ch:
+            bot._collect_group_positions(1, 1, 2, cache)
+        mock_ch.assert_called_once_with(1)
+        assert 1 in cache
+
+    def test_size_one_returns_single_element(self):
+        cache = {1: self._chapter(7)}
+        positions = bot._collect_group_positions(1, 4, 1, cache)
+        assert positions == [(1, 4)]
+
+
+# ------------------------------------------------------------------ #
+# Tests for post_verse_group                                           #
+# ------------------------------------------------------------------ #
+
+class TestPostVerseGroup:
+    def _build_video_noop(self, audio_urls, nature_video, output_path):
+        # Create a tiny fake video file so os.unlink succeeds
+        with open(output_path, "wb") as fh:
+            fh.write(b"FAKEMP4")
+        return output_path
+
+    def test_success_advances_state_by_group_size(self, tmp_db):
+        with (
+            _patch_quran(),
+            _patch_video_twitter(),
+            patch("bot.video_maker.build_video", side_effect=self._build_video_noop),
+            patch("bot.config.group_size", 3),
+            patch("bot.config.enable_video", True),
+        ):
+            bot.post_verse_group(db_path=tmp_db)
+
+        with db.get_connection(tmp_db) as conn:
+            state = db.get_state(conn)
+        # Started at 1:1; group_size=3 → should be at 1:4
+        assert state["current_chapter"] == 1
+        assert state["current_verse"] == 4
+
+    def test_success_logs_history_row(self, tmp_db):
+        with (
+            _patch_quran(),
+            _patch_video_twitter(),
+            patch("bot.video_maker.build_video", side_effect=self._build_video_noop),
+            patch("bot.config.group_size", 2),
+        ):
+            bot.post_verse_group(db_path=tmp_db)
+
+        with db.get_connection(tmp_db) as conn:
+            history = db.get_history(conn)
+        assert len(history) == 1
+        assert history[0]["status"] == "success"
+        assert history[0]["chapter_number"] == 1
+        assert history[0]["verse_number"] == 1
+
+    def test_failure_does_not_advance_state(self, tmp_db):
+        with (
+            _patch_quran(),
+            patch(
+                "bot.video_maker.build_video",
+                side_effect=RuntimeError("ffmpeg missing"),
+            ),
+            patch("bot.config.group_size", 3),
+        ):
+            bot.post_verse_group(db_path=tmp_db)
+
+        with db.get_connection(tmp_db) as conn:
+            state = db.get_state(conn)
+            history = db.get_history(conn)
+
+        assert state["current_chapter"] == 1
+        assert state["current_verse"] == 1
+        assert history[0]["status"] == "failed"
+        assert "ffmpeg missing" in history[0]["error_message"]
+
+    def test_cleans_up_temp_video_on_success(self, tmp_db):
+        deleted: list[str] = []
+
+        def fake_build(audio_urls, nature, output):
+            with open(output, "wb") as fh:
+                fh.write(b"MP4")
+            return output
+
+        original_unlink = __import__("os").unlink
+
+        def tracking_unlink(path):
+            deleted.append(path)
+            original_unlink(path)
+
+        with (
+            _patch_quran(),
+            _patch_video_twitter(),
+            patch("bot.video_maker.build_video", side_effect=fake_build),
+            patch("bot.config.group_size", 1),
+            patch("bot.os.unlink", side_effect=tracking_unlink),
+        ):
+            bot.post_verse_group(db_path=tmp_db)
+
+        assert len(deleted) == 1
+        import os
+        assert not os.path.exists(deleted[0])
+
