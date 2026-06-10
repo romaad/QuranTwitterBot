@@ -41,6 +41,7 @@ _VERSES = {
     (1, 1): {
         "id": 1,
         "verse_number": 1,
+        "ruku_number": 1,
         "text_uthmani": "بِسْمِ ٱللَّهِ ٱلرَّحْمَـٰنِ ٱلرَّحِيمِ",
         "translations": [
             {
@@ -49,15 +50,24 @@ _VERSES = {
             }
         ],
     },
+    (1, 2): {
+        "id": 2,
+        "verse_number": 2,
+        "ruku_number": 1,
+        "text_uthmani": "ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَـٰلَمِينَ",
+        "translations": [{"id": 131, "text": "All praise is due to Allah, Lord of the worlds."}],
+    },
     (2, 1): {
         "id": 8,
         "verse_number": 1,
+        "ruku_number": 2,
         "text_uthmani": "الٓمٓ",
         "translations": [{"id": 131, "text": "Alif, Lam, Meem."}],
     },
     (3, 1): {
         "id": 293,
         "verse_number": 1,
+        "ruku_number": 10,
         "text_uthmani": "الٓمٓ",
         "translations": [{"id": 131, "text": "Alif, Lam, Meem."}],
     },

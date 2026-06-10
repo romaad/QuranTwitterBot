@@ -42,7 +42,7 @@ def get_verse(chapter_number: int, verse_number: int, translation_id: int = 131)
     url = f"{BASE_URL}/verses/by_chapter/{chapter_number}"
     params = {
         "translations": translation_id,
-        "fields": "text_uthmani",
+        "fields": "text_uthmani,ruku_number",
         "per_page": 1,
         # verse_number is 1-based; the API accepts verse_key like "1:1"
         # but offset+limit on by_chapter is simpler for sequential traversal.
@@ -56,6 +56,11 @@ def get_verse(chapter_number: int, verse_number: int, translation_id: int = 131)
             f"No verse found for chapter {chapter_number}, verse {verse_number}"
         )
     return verses[0]
+
+
+def extract_ruku_number(verse: dict) -> int | None:
+    """Return the ruku number from a verse dict, or None if absent."""
+    return verse.get("ruku_number")
 
 
 def extract_arabic(verse: dict) -> str:
