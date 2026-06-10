@@ -6,29 +6,6 @@ import pytest
 
 import video_maker
 
-# ------------------------------------------------------------------ #
-# Helpers                                                              #
-# ------------------------------------------------------------------ #
-
-def _pexels_response(video_id=1, width=1080, height=1920, link="https://pexels.com/v.mp4"):
-    return {
-        "videos": [
-            {
-                "id": video_id,
-                "video_files": [
-                    {
-                        "id": 1,
-                        "file_type": "video/mp4",
-                        "width": width,
-                        "height": height,
-                        "link": link,
-                    }
-                ],
-            }
-        ]
-    }
-
-
 
 class TestDownloadAudio:
     def test_writes_response_content_to_file(self, tmp_path):
@@ -65,8 +42,7 @@ class TestBuildVideo:
             "https://cdn.example.com/verse_002.mp3",
         ]
         nature_video = str(tmp_path / "nature.mp4")
-        nature_video_obj = open(nature_video, "wb")
-        nature_video_obj.close()
+        open(nature_video, "wb").close()
         output = str(tmp_path / "out.mp4")
 
         mock_response = MagicMock()
@@ -78,7 +54,7 @@ class TestBuildVideo:
         ):
             video_maker.build_video(audio_urls, nature_video, output)
 
-        # Expect two ffmpeg calls: concat + overlay (single clip → no xfade step)
+        # Two ffmpeg calls: concat + overlay (single clip → no xfade step)
         assert mock_ffmpeg.call_count == 2
         concat_args = mock_ffmpeg.call_args_list[0][0][0]
         overlay_args = mock_ffmpeg.call_args_list[1][0][0]
@@ -222,115 +198,122 @@ class TestBuildVideo:
         assert "-vf" not in overlay_args
         assert "copy" in overlay_args
 
+    def test_subtitle_filter_included_when_verse_texts_given(self, tmp_path):
+        """When verse_texts is provided, the overlay -vf must include a subtitles filter."""
+        mock_response = MagicMock()
+        mock_response.content = b"MP3"
+        output = str(tmp_path / "out.mp4")
 
-class TestFetchNatureVideo:
-    def _mock_search_response(self, data):
-        search_resp = MagicMock()
-        search_resp.json.return_value = data
-        search_resp.raise_for_status = MagicMock()
-        return search_resp
+        # Provide fake segments: verse has one word from 0..1000 ms
+        verse_texts = [("Arabic text", "English text")]
+        verse_segments = [[[0, 0, 1000]]]
 
-    def _mock_download_response(self, content=b"VIDEODATA"):
-        dl_resp = MagicMock()
-        dl_resp.raise_for_status = MagicMock()
-        dl_resp.iter_content = MagicMock(return_value=[content])
-        return dl_resp
+        with (
+            patch("video_maker.requests.get", return_value=mock_response),
+            patch("video_maker._run_ffmpeg") as mock_ffmpeg,
+            patch("video_maker._get_audio_duration", return_value=1.0),
+        ):
+            video_maker.build_video(
+                ["https://cdn.example.com/v1.mp3"],
+                "nature.mp4",
+                output,
+                verse_texts=verse_texts,
+                verse_segments=verse_segments,
+            )
 
-    def test_downloads_video_to_output_path(self, tmp_path):
-        output = str(tmp_path / "nature.mp4")
-        pexels_data = _pexels_response()
+        overlay_args = mock_ffmpeg.call_args_list[1][0][0]
+        assert "-vf" in overlay_args
+        vf_value = overlay_args[overlay_args.index("-vf") + 1]
+        assert "subtitles" in vf_value
 
-        with patch("video_maker.requests.get") as mock_get:
-            mock_get.side_effect = [
-                self._mock_search_response(pexels_data),
-                self._mock_download_response(b"FAKEMP4"),
-            ]
-            result = video_maker.fetch_nature_video("nature", "api_key_xxx", output)
 
-        assert result == output
-        with open(output, "rb") as fh:
-            assert fh.read() == b"FAKEMP4"
+class TestComputeVerseTimings:
+    def test_uses_segments_when_provided(self, tmp_path):
+        audio_files = [str(tmp_path / "v1.mp3")]
+        open(audio_files[0], "wb").close()
+        verse_texts = [("Arabic", "English")]
+        verse_segments = [[[0, 0, 500], [1, 500, 1200]]]
 
-    def test_raises_on_empty_results(self, tmp_path):
-        output = str(tmp_path / "nature.mp4")
+        with patch("video_maker._get_audio_duration", return_value=1.2):
+            timings = video_maker.compute_verse_timings(
+                audio_files, verse_texts, verse_segments
+            )
 
-        with patch("video_maker.requests.get") as mock_get:
-            mock_get.return_value = self._mock_search_response({"videos": []})
-            with pytest.raises(ValueError, match="No Pexels videos found"):
-                video_maker.fetch_nature_video("nature", "key", output)
+        assert len(timings) == 1
+        t = timings[0]
+        assert t.arabic == "Arabic"
+        assert t.english == "English"
+        assert t.start_ms == 0
+        assert t.end_ms == 1200  # max of last segment end
 
-    def test_raises_when_no_mp4_file(self, tmp_path):
-        output = str(tmp_path / "nature.mp4")
-        data = {
-            "videos": [{"id": 1, "video_files": [{"file_type": "video/webm", "link": "x"}]}]
-        }
+    def test_ffprobe_fallback_when_no_segments(self, tmp_path):
+        audio_files = [str(tmp_path / "v1.mp3")]
+        open(audio_files[0], "wb").close()
+        verse_texts = [("Ar", "En")]
+        verse_segments = [[]]  # empty → use ffprobe
 
-        with patch("video_maker.requests.get") as mock_get:
-            mock_get.return_value = self._mock_search_response(data)
-            with pytest.raises(ValueError, match="No MP4 file found"):
-                video_maker.fetch_nature_video("nature", "key", output)
+        with patch("video_maker._get_audio_duration", return_value=3.5):
+            timings = video_maker.compute_verse_timings(
+                audio_files, verse_texts, verse_segments
+            )
 
-    def test_picks_highest_resolution_file(self, tmp_path):
-        output = str(tmp_path / "nature.mp4")
-        hd_link = "https://pexels.com/hd.mp4"
-        sd_link = "https://pexels.com/sd.mp4"
-        data = {
-            "videos": [
-                {
-                    "id": 1,
-                    "video_files": [
-                        {"file_type": "video/mp4", "width": 1080, "height": 1920, "link": hd_link},
-                        {"file_type": "video/mp4", "width": 540, "height": 960, "link": sd_link},
-                    ],
-                }
-            ]
-        }
+        assert timings[0].end_ms == 3500  # 3.5s * 1000
 
-        downloaded_urls: list[str] = []
+    def test_cumulative_start_offsets(self, tmp_path):
+        a1 = str(tmp_path / "v1.mp3")
+        a2 = str(tmp_path / "v2.mp3")
+        for p in (a1, a2):
+            open(p, "wb").close()
+        verse_texts = [("Ar1", "En1"), ("Ar2", "En2")]
+        # Verse 1: 2s; Verse 2: 3s
+        verse_segments = [[[0, 0, 2000]], [[0, 0, 3000]]]
 
-        def fake_get(url, **kwargs):
-            if "pexels.com/videos/search" in url:
-                return self._mock_search_response(data)
-            downloaded_urls.append(url)
-            return self._mock_download_response()
+        with patch("video_maker._get_audio_duration", side_effect=[2.0, 3.0]):
+            timings = video_maker.compute_verse_timings(
+                [a1, a2], verse_texts, verse_segments
+            )
 
-        with patch("video_maker.requests.get", side_effect=fake_get):
-            video_maker.fetch_nature_video("nature", "key", output)
+        assert timings[0].start_ms == 0
+        assert timings[0].end_ms == 2000
+        assert timings[1].start_ms == 2000  # offset by duration of first verse
+        assert timings[1].end_ms == 5000   # 2000 + 3000
 
-        assert downloaded_urls == [hd_link]
 
-    def test_sends_api_key_header(self, tmp_path):
-        output = str(tmp_path / "nature.mp4")
-        pexels_data = _pexels_response()
-        captured: list[dict] = []
+class TestBuildSubtitleFile:
+    def test_creates_srt_file(self, tmp_path):
+        from video_maker import VerseTiming, _build_subtitle_file
 
-        def fake_get(url, headers=None, **kwargs):
-            if "pexels.com/videos/search" in url:
-                captured.append(headers or {})
-                return self._mock_search_response(pexels_data)
-            return self._mock_download_response()
+        timings = [
+            VerseTiming(arabic="بسم الله", english="In the name", start_ms=0, end_ms=2000),
+            VerseTiming(arabic="الحمد", english="All praise", start_ms=2000, end_ms=5000),
+        ]
+        srt_path = str(tmp_path / "subs.srt")
+        _build_subtitle_file(timings, srt_path)
 
-        with patch("video_maker.requests.get", side_effect=fake_get):
-            video_maker.fetch_nature_video("nature", "MY_API_KEY", output)
+        with open(srt_path, encoding="utf-8") as fh:
+            content = fh.read()
 
-        assert captured[0].get("Authorization") == "MY_API_KEY"
+        assert "بسم الله" in content
+        assert "In the name" in content
+        assert "الحمد" in content
+        assert "00:00:00,000 --> 00:00:02,000" in content
 
-    def test_sends_humans_zero_param(self, tmp_path):
-        """The search request must include humans=0 to exclude human subjects."""
-        output = str(tmp_path / "nature.mp4")
-        pexels_data = _pexels_response()
-        captured_params: list[dict] = []
+    def test_srt_sequence_numbers(self, tmp_path):
+        from video_maker import VerseTiming, _build_subtitle_file
 
-        def fake_get(url, params=None, **kwargs):
-            if "pexels.com/videos/search" in url:
-                captured_params.append(params or {})
-                return self._mock_search_response(pexels_data)
-            return self._mock_download_response()
+        timings = [
+            VerseTiming(arabic="A", english="a", start_ms=0, end_ms=1000),
+            VerseTiming(arabic="B", english="b", start_ms=1000, end_ms=2000),
+        ]
+        srt_path = str(tmp_path / "subs.srt")
+        _build_subtitle_file(timings, srt_path)
 
-        with patch("video_maker.requests.get", side_effect=fake_get):
-            video_maker.fetch_nature_video("nature", "key", output)
-
-        assert captured_params[0].get("humans") == 0
+        with open(srt_path) as fh:
+            content = fh.read()
+        # SRT sequence numbers appear as standalone lines
+        lines = content.splitlines()
+        assert "1" in lines
+        assert "2" in lines
 
 
 class TestBuildVideoMultiClip:

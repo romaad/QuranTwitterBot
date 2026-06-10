@@ -7,94 +7,36 @@ can be uploaded to X (Twitter).
 
 When multiple background clips are provided they are joined with an
 xfade (cross-fade) transition so the final background is a smooth montage
-that fills the audio duration.  A configurable darkening filter is also
-applied so overlaid text remains readable.
+that fills the audio duration.  A configurable darkening filter is applied
+so overlaid text remains readable.
 
-Nature videos can be fetched automatically from the Pexels API
-(https://www.pexels.com/api/) by calling ``fetch_nature_video``.
-Set the ``PEXELS_API_KEY`` environment variable and pass ``orientation="portrait"``
-to get a mobile-ready 9:16 clip without needing a local file.
+Arabic verse text (and its English translation) is burned into the video as
+SRT subtitles timed to each verse's audio duration, using timing data supplied
+by the caller (derived from the Quran API's ``audio_segments`` field, or
+computed via ffprobe as a fallback).
 
 Requirements: ffmpeg and ffprobe must be available on PATH.
 """
 import logging
 import os
-import random
 import shutil
 import subprocess
 import tempfile
+from dataclasses import dataclass
 
 import requests
 
 log = logging.getLogger(__name__)
 
-PEXELS_VIDEO_SEARCH_URL = "https://api.pexels.com/videos/search"
 
+@dataclass
+class VerseTiming:
+    """Start and end position of a single verse within the concatenated audio."""
 
-def fetch_nature_video(
-    query: str,
-    api_key: str,
-    output_path: str,
-    orientation: str = "portrait",
-    per_page: int = 15,
-) -> str:
-    """
-    Search Pexels for a *query* video (excluding human subjects) and
-    download it to *output_path*.
-
-    Parameters
-    ----------
-    query:
-        Search term, e.g. ``"nature"`` or ``"wildlife"``
-    api_key:
-        Pexels API key (obtain a free key at https://www.pexels.com/api/).
-    output_path:
-        Destination file path for the downloaded MP4.
-    orientation:
-        ``"portrait"`` (default, 9:16 mobile), ``"landscape"``, or ``"square"``.
-    per_page:
-        Number of results to retrieve; a random one is selected.
-
-    Returns *output_path* on success.
-    Raises ``ValueError`` if no results are found or no suitable video file exists.
-    Raises ``requests.HTTPError`` if the API or download request fails.
-    """
-    headers = {"Authorization": api_key}
-    params = {
-        "query": query,
-        "orientation": orientation,
-        "per_page": per_page,
-        "humans": 0,
-    }
-    response = requests.get(PEXELS_VIDEO_SEARCH_URL, headers=headers, params=params, timeout=30)
-    response.raise_for_status()
-
-    videos = response.json().get("videos", [])
-    if not videos:
-        raise ValueError(f"No Pexels videos found for query '{query}'")
-
-    video = random.choice(videos)
-
-    # Pick the highest-resolution MP4 link available
-    video_files = [
-        vf for vf in video.get("video_files", [])
-        if vf.get("file_type") == "video/mp4" and vf.get("link")
-    ]
-    if not video_files:
-        raise ValueError(f"No MP4 file found for Pexels video id={video.get('id')}")
-
-    best = max(video_files, key=lambda vf: (vf.get("width", 0) * vf.get("height", 0)))
-    link = best["link"]
-
-    log.debug("Downloading Pexels video %s → %s", link, output_path)
-    dl = requests.get(link, timeout=120, stream=True)
-    dl.raise_for_status()
-    with open(output_path, "wb") as fh:
-        for chunk in dl.iter_content(chunk_size=1 << 20):
-            fh.write(chunk)
-
-    log.info("Pexels nature video saved to %s", output_path)
-    return output_path
+    arabic: str
+    english: str
+    start_ms: int   # milliseconds from the start of the combined audio
+    end_ms: int     # exclusive end time in milliseconds
 
 
 def download_audio(url: str, dest_path: str) -> None:
@@ -180,6 +122,8 @@ def build_video(
     width: int = 0,
     height: int = 0,
     darken: float = 0.15,
+    verse_texts: "list[tuple[str, str]] | None" = None,
+    verse_segments: "list[list] | None" = None,
 ) -> str:
     """
     Produce a video by combining verse audio with one or more nature clips.
@@ -193,7 +137,10 @@ def build_video(
     4. Apply a darkening filter (*darken* controls brightness reduction) and
        optionally scale/crop to *width* × *height* (e.g. 1080 × 1920 for
        mobile portrait 9:16).
-    5. Write the final MP4 to *output_path*.
+    5. If *verse_texts* is provided, compute per-verse timing (from
+       *verse_segments* API data when available, otherwise via ffprobe) and
+       burn SRT subtitles (Arabic + English) into the video.
+    6. Write the final MP4 to *output_path*.
 
     Parameters
     ----------
@@ -203,6 +150,16 @@ def build_video(
     darken:
         Brightness reduction applied to the background (0.0 = none,
         positive values darken; default 0.15).
+    verse_texts:
+        Optional parallel list of ``(arabic, english)`` tuples, one per URL
+        in *audio_urls*.  When provided, each verse's text is burned into the
+        video as an SRT subtitle at the correct timestamp.
+    verse_segments:
+        Optional API timing data, one entry per URL in *audio_urls*.  Each
+        entry is a list of ``[word_idx, start_ms, end_ms]`` triples as
+        returned by ``quran_api.Verse.audio_segments``.  Used to compute
+        verse duration without extra ffprobe calls; ffprobe is used as a
+        fallback for any verse whose segments list is empty.
 
     Returns *output_path* on success.
     Raises ``ValueError`` if *audio_urls* is empty.
@@ -249,7 +206,14 @@ def build_video(
             bg_input_args = ["-stream_loop", "-1", "-i", bg_path]
             shortest_flag = ["-shortest"]
 
-        # ── 4 & 5. Overlay audio + apply filters ──────────────────────── #
+        # ── 4. Build SRT subtitles (optional) ────────────────────────── #
+        srt_path: str | None = None
+        if verse_texts:
+            timings = compute_verse_timings(audio_files, verse_texts, verse_segments)
+            srt_path = os.path.join(work_dir, "subs.srt")
+            _build_subtitle_file(timings, srt_path)
+
+        # ── 5. Overlay audio + apply filters ──────────────────────────── #
         apply_resize = width > 0 and height > 0
         vf_parts: list[str] = []
         if apply_resize:
@@ -259,6 +223,10 @@ def build_video(
             )
         if darken > 0:
             vf_parts.append(f"eq=brightness=-{darken:.2f}")
+        if srt_path:
+            # Escape backslashes and colons for the ffmpeg subtitles filter
+            escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:")
+            vf_parts.append(f"subtitles={escaped}")
 
         overlay_args = [
             *bg_input_args,
@@ -277,6 +245,74 @@ def build_video(
         return output_path
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _build_subtitle_file(timings: "list[VerseTiming]", srt_path: str) -> None:
+    """Write an SRT subtitle file from *timings* to *srt_path*.
+
+    Each entry shows the Arabic verse text on the first line and the English
+    translation on the second line.
+    """
+    with open(srt_path, "w", encoding="utf-8") as fh:
+        for idx, vt in enumerate(timings, 1):
+            start = _ms_to_srt_time(vt.start_ms)
+            end = _ms_to_srt_time(vt.end_ms)
+            fh.write(f"{idx}\n{start} --> {end}\n{vt.arabic}\n{vt.english}\n\n")
+
+
+def _ms_to_srt_time(ms: int) -> str:
+    """Convert milliseconds to SRT timestamp ``HH:MM:SS,mmm``."""
+    h = ms // 3_600_000
+    ms %= 3_600_000
+    m = ms // 60_000
+    ms %= 60_000
+    s = ms // 1_000
+    ms %= 1_000
+    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+
+
+def compute_verse_timings(
+    audio_files: list[str],
+    verse_texts: list[tuple[str, str]],
+    verse_segments: list[list] | None = None,
+) -> list[VerseTiming]:
+    """Compute per-verse start/end times for the concatenated audio.
+
+    Parameters
+    ----------
+    audio_files:
+        Ordered list of downloaded verse MP3 paths.
+    verse_texts:
+        Parallel list of ``(arabic_text, english_text)`` tuples.
+    verse_segments:
+        Optional API timing data per verse: each entry is a list of
+        ``[word_idx, start_ms, end_ms]`` triples (as returned by
+        ``quran_api.Verse.audio_segments``).  When non-empty for a verse, the
+        last segment's ``end_ms`` is used as the verse duration; otherwise
+        ffprobe is used as a fallback.
+
+    Returns a :class:`VerseTiming` list aligned with *audio_files*.
+    """
+    timings: list[VerseTiming] = []
+    offset_ms = 0
+    for i, (audio_path, (arabic, english)) in enumerate(
+        zip(audio_files, verse_texts)
+    ):
+        segs = (verse_segments[i] if verse_segments and i < len(verse_segments) else [])
+        if segs:
+            duration_ms = max(seg[2] for seg in segs)
+        else:
+            duration_ms = int(_get_audio_duration(audio_path) * 1000)
+        timings.append(
+            VerseTiming(
+                arabic=arabic,
+                english=english,
+                start_ms=offset_ms,
+                end_ms=offset_ms + duration_ms,
+            )
+        )
+        offset_ms += duration_ms
+    return timings
 
 
 def _run_ffmpeg(args: list[str]) -> None:

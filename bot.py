@@ -3,7 +3,7 @@ Main bot entry-point.
 
 Runs an APScheduler cron job that:
 1. Reads the current position from SQLite.
-2. Fetches the verse from the Quran API.
+2. Fetches the ruku (or single verse) from the Quran API.
 3. Posts to X (Twitter).
 4. Logs the result to verse_history.
 5. Advances state on success.
@@ -20,6 +20,9 @@ import quran_api
 import twitter_client
 import video_maker
 from config import config
+from pexels import PexelsClient
+from secrets import Secrets
+from twitter_client import Tweet
 
 logging.basicConfig(
     level=logging.INFO,
@@ -35,9 +38,6 @@ def _next_position(chapter: int, verse: int, verses_in_chapter: int) -> tuple[in
     # Move to next chapter, wrapping around after chapter 114
     next_chapter = chapter + 1 if chapter < config.num_chapters else 1
     return next_chapter, 1
-
-
-
 
 
 def post_verse(db_path: str = None) -> None:
@@ -72,15 +72,20 @@ def post_verse(db_path: str = None) -> None:
 
             chapter_name_ar = chapter.get("name_arabic", "")
             chapter_name_en = chapter.get("translated_name", {}).get("name", "")
-            tweet_ids = twitter_client.post_thread(
-                arabic_text=arabic_text,
-                english_text=english_text,
-                chapter_name_arabic=chapter_name_ar,
-                chapter_name_english=chapter_name_en,
-                verse_number=verse_num,
-                max_length=config.max_tweet_length,
-                mode=config.tweet_mode,
-            )
+
+            tweets = [
+                Tweet(
+                    text=twitter_client._format_tweet(
+                        arabic_text, chapter_name_ar, verse_num, config.max_tweet_length
+                    )
+                ),
+                Tweet(
+                    text=twitter_client._format_tweet(
+                        english_text, chapter_name_en, verse_num, config.max_tweet_length
+                    )
+                ),
+            ]
+            tweet_ids = twitter_client.post_thread(tweets, mode=config.tweet_mode)
             status = "success"
             log.info("Posted tweets: %s", tweet_ids)
 
@@ -110,59 +115,21 @@ def post_verse(db_path: str = None) -> None:
             log.info("State advanced to chapter %d, verse %d", next_ch, next_v)
 
 
-def _collect_ruku_positions(
-    start_chapter: int,
-    start_verse: int,
-    chapter_cache: dict | None = None,
-) -> list[tuple[int, int]]:
+def _fetch_background_videos(secrets: Secrets, work_dir: str) -> list[str]:
     """
-    Return all (chapter, verse) positions that belong to the same ruku as
-    the verse at (*start_chapter*, *start_verse*).
+    Return the list of background video paths to use for the ruku video.
 
-    Fetches each verse's ``ruku_number`` field from the API and stops as
-    soon as the number changes.  *chapter_cache* is an optional dict mapping
-    chapter numbers to their metadata dicts; entries are added lazily.
+    When *secrets.pexels_api_key* is set, one video is fetched per query in
+    *config.nature_video_queries* using :class:`~pexels.PexelsClient` and
+    saved inside *work_dir*.  Otherwise the single local file at
+    *config.nature_video_path* is used.
     """
-    if chapter_cache is None:
-        chapter_cache = {}
-
-    start_verse_data = quran_api.get_verse(start_chapter, start_verse, config.translation_id)
-    target_ruku = quran_api.extract_ruku_number(start_verse_data)
-
-    positions: list[tuple[int, int]] = []
-    chapter, verse = start_chapter, start_verse
-
-    while True:
-        positions.append((chapter, verse))
-        if chapter not in chapter_cache:
-            chapter_cache[chapter] = quran_api.get_chapter(chapter)
-        verses_count = chapter_cache[chapter]["verses_count"]
-        next_ch, next_v = _next_position(chapter, verse, verses_count)
-
-        next_verse_data = quran_api.get_verse(next_ch, next_v, config.translation_id)
-        next_ruku = quran_api.extract_ruku_number(next_verse_data)
-        if next_ruku != target_ruku:
-            break
-        chapter, verse = next_ch, next_v
-
-    return positions
-
-
-def _resolve_nature_videos(work_dir: str) -> list[str]:
-    """
-    Return the list of background video paths to use.
-
-    When ``PEXELS_API_KEY`` is set in the environment, one video is fetched
-    per query in *config.nature_video_queries* and saved as separate files
-    inside *work_dir*.  Otherwise the single local file at
-    *config.nature_video_path* is returned.
-    """
-    api_key = os.environ.get("PEXELS_API_KEY", "")
-    if api_key:
+    if secrets.pexels_api_key:
+        client = PexelsClient(secrets.pexels_api_key)
         paths: list[str] = []
         for i, query in enumerate(config.nature_video_queries):
             dest = os.path.join(work_dir, f"nature_bg_{i:02d}.mp4")
-            video_maker.fetch_nature_video(query, api_key, dest)
+            client.fetch_video(query, dest)
             paths.append(dest)
         return paths
     return [config.nature_video_path]
@@ -170,16 +137,16 @@ def _resolve_nature_videos(work_dir: str) -> list[str]:
 
 def post_ruku_group(db_path: str = None) -> None:
     """
-    Post all verses in the current ruku as a single video tweet.
+    Post all verses in the current ruku as a single video tweet thread.
 
-    Groups verses automatically by their ``ruku_number`` field from the API,
-    so each post covers exactly one natural Quran section regardless of its
-    length.  State is advanced to the first verse of the next ruku on success.
+    Uses the Quran API's ruku endpoint to retrieve all verses in the current
+    ruku in one call, then builds a video (with optional Pexels background and
+    verse-text subtitle overlay), and posts a three-tweet thread:
+    Arabic text → English text → video.
 
-    The background video is auto-fetched from Pexels when ``PEXELS_API_KEY``
-    is set in the environment; otherwise *config.nature_video_path* is used.
-    The output video is scaled/cropped to *config.video_width* ×
-    *config.video_height* (default 1080 × 1920, mobile portrait 9:16).
+    Credentials are loaded from environment variables via
+    :class:`~secrets.Secrets`.  State is advanced to the first verse of the
+    next ruku on success.
     """
     if db_path is None:
         db_path = config.db_path
@@ -196,56 +163,81 @@ def post_ruku_group(db_path: str = None) -> None:
             chapter_num, verse_num,
         )
 
-        arabic_texts: list[str] = []
-        english_texts: list[str] = []
+        arabic_text = ""
+        english_text = ""
         tweet_ids: list = []
         error_msg = None
         status = "failed"
-        chapter_cache: dict = {}
+        verses = []
 
         try:
-            positions = _collect_ruku_positions(chapter_num, verse_num, chapter_cache)
-            log.info("Ruku spans %d verses: %s … %s", len(positions), positions[0], positions[-1])
+            secrets = Secrets.from_env()
 
-            # Fetch text for all verses in the ruku
-            for ch, v in positions:
-                if ch not in chapter_cache:
-                    chapter_cache[ch] = quran_api.get_chapter(ch)
-                verse = quran_api.get_verse(ch, v, config.translation_id)
-                arabic_texts.append(quran_api.extract_arabic(verse))
-                english_texts.append(quran_api.extract_english(verse))
+            # ── 1. Identify ruku number ───────────────────────────────── #
+            start_verse_data = quran_api.get_verse(
+                chapter_num, verse_num, config.translation_id
+            )
+            ruku_number = quran_api.extract_ruku_number(start_verse_data)
+            log.info("Current verse is in ruku %s", ruku_number)
 
-            arabic_text = " ".join(arabic_texts)
-            english_text = " ".join(english_texts)
+            # ── 2. Fetch all verses in this ruku ─────────────────────── #
+            verses = quran_api.get_verses_by_ruku(
+                ruku_number, config.translation_id, config.recitation_id
+            )
+            log.info(
+                "Ruku %s spans %d verse(s): %s … %s",
+                ruku_number,
+                len(verses),
+                verses[0].verse_key,
+                verses[-1].verse_key,
+            )
 
-            audio_urls = quran_api.get_verses_audio_urls(positions, config.recitation_id)
+            arabic_text = " ".join(v.arabic for v in verses)
+            english_text = " ".join(v.english for v in verses)
+            audio_urls = [v.audio_url for v in verses]
 
-            first_ch, first_v = positions[0]
-            last_ch, last_v = positions[-1]
-            chapter_data = chapter_cache[first_ch]
+            first_verse = verses[0]
+            last_verse = verses[-1]
+            chapter_data = quran_api.get_chapter(first_verse.chapter_number)
             chapter_name_ar = chapter_data.get("name_arabic", "")
             chapter_name_en = chapter_data.get("translated_name", {}).get("name", "")
+            verse_label = (
+                f"{first_verse.verse_number}-{last_verse.verse_number}"
+                if first_verse.verse_number != last_verse.verse_number
+                else str(first_verse.verse_number)
+            )
 
             with tempfile.TemporaryDirectory(prefix="quran_ruku_") as tmp_dir:
                 output_path = os.path.join(tmp_dir, "output.mp4")
-                nature_paths = _resolve_nature_videos(tmp_dir)
+                nature_paths = _fetch_background_videos(secrets, tmp_dir)
+
                 video_maker.build_video(
                     audio_urls,
                     nature_paths,
                     output_path,
                     width=config.video_width,
                     height=config.video_height,
+                    darken=config.video_darken,
+                    verse_texts=[(v.arabic, v.english) for v in verses],
+                    verse_segments=[v.audio_segments for v in verses],
                 )
 
-                tweet_ids = twitter_client.post_video_thread(
-                    video_path=output_path,
-                    arabic_text=arabic_text,
-                    english_text=english_text,
-                    chapter_name_arabic=chapter_name_ar,
-                    chapter_name_english=chapter_name_en,
-                    verse_start=first_v,
-                    verse_end=last_v,
-                    max_length=config.max_tweet_length,
+                tweet_ids = twitter_client.post_thread(
+                    [
+                        Tweet(
+                            text=twitter_client._format_tweet(
+                                arabic_text, chapter_name_ar, verse_label,
+                                config.max_tweet_length
+                            )
+                        ),
+                        Tweet(
+                            text=twitter_client._format_tweet(
+                                english_text, chapter_name_en, verse_label,
+                                config.max_tweet_length
+                            )
+                        ),
+                        Tweet(video_path=output_path),
+                    ],
                     mode=config.tweet_mode,
                 )
 
@@ -260,8 +252,8 @@ def post_ruku_group(db_path: str = None) -> None:
             conn=conn,
             chapter_number=chapter_num,
             verse_number=verse_num,
-            arabic_text=" ".join(arabic_texts),
-            english_text=" ".join(english_texts),
+            arabic_text=arabic_text,
+            english_text=english_text,
             tweet_ids=tweet_ids,
             status=status,
             error_message=error_msg,
@@ -269,12 +261,12 @@ def post_ruku_group(db_path: str = None) -> None:
 
         # Advance state to the first verse of the next ruku
         if status == "success":
-            # positions already computed; advance one step past the last verse
-            last_ch, last_v = positions[-1]
-            if last_ch not in chapter_cache:
-                chapter_cache[last_ch] = quran_api.get_chapter(last_ch)
-            verses_count = chapter_cache[last_ch]["verses_count"]
-            next_ch, next_v = _next_position(last_ch, last_v, verses_count)
+            last_ch = verses[-1].chapter_number
+            last_v = verses[-1].verse_number
+            chapter_data = quran_api.get_chapter(last_ch)
+            next_ch, next_v = _next_position(
+                last_ch, last_v, chapter_data["verses_count"]
+            )
             db.save_state(conn, next_ch, next_v)
             log.info("State advanced to chapter %d, verse %d", next_ch, next_v)
 
