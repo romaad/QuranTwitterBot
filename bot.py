@@ -74,16 +74,15 @@ def post_verse(db_path: str = None) -> None:
             chapter_name_en = chapter.get("translated_name", {}).get("name", "")
 
             tweets = [
-                Tweet(
-                    text=twitter_client._format_tweet(
-                        arabic_text, chapter_name_ar, verse_num, config.max_tweet_length
-                    )
-                ),
-                Tweet(
-                    text=twitter_client._format_tweet(
-                        english_text, chapter_name_en, verse_num, config.max_tweet_length
-                    )
-                ),
+                Tweet(text=t)
+                for t in twitter_client._format_tweet(
+                    arabic_text, chapter_name_ar, verse_num, config.max_tweet_length
+                )
+            ] + [
+                Tweet(text=t)
+                for t in twitter_client._format_tweet(
+                    english_text, chapter_name_en, verse_num, config.max_tweet_length
+                )
             ]
             tweet_ids = twitter_client.post_thread(tweets, mode=config.tweet_mode)
             status = "success"
@@ -222,22 +221,22 @@ def post_ruku_group(db_path: str = None) -> None:
                     verse_segments=[v.audio_segments for v in verses],
                 )
 
+                arabic_tweets = [
+                    Tweet(text=t)
+                    for t in twitter_client._format_tweet(
+                        arabic_text, chapter_name_ar, verse_label,
+                        config.max_tweet_length
+                    )
+                ]
+                english_tweets = [
+                    Tweet(text=t)
+                    for t in twitter_client._format_tweet(
+                        english_text, chapter_name_en, verse_label,
+                        config.max_tweet_length
+                    )
+                ]
                 tweet_ids = twitter_client.post_thread(
-                    [
-                        Tweet(
-                            text=twitter_client._format_tweet(
-                                arabic_text, chapter_name_ar, verse_label,
-                                config.max_tweet_length
-                            )
-                        ),
-                        Tweet(
-                            text=twitter_client._format_tweet(
-                                english_text, chapter_name_en, verse_label,
-                                config.max_tweet_length
-                            )
-                        ),
-                        Tweet(video_path=output_path),
-                    ],
+                    arabic_tweets + english_tweets + [Tweet(video_path=output_path)],
                     mode=config.tweet_mode,
                 )
 

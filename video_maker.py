@@ -117,13 +117,13 @@ def _build_xfade_background(
 
 def build_video(
     audio_urls: list[str],
-    nature_video_paths: "list[str] | str",
+    nature_video_paths: list[str] | str,
     output_path: str,
     width: int = 0,
     height: int = 0,
     darken: float = 0.15,
-    verse_texts: "list[tuple[str, str]] | None" = None,
-    verse_segments: "list[list] | None" = None,
+    verse_texts: list[tuple[str, str]] | None = None,
+    verse_segments: list[list[list[int]]] | None = None,
 ) -> str:
     """
     Produce a video by combining verse audio with one or more nature clips.
@@ -247,7 +247,7 @@ def build_video(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _build_subtitle_file(timings: "list[VerseTiming]", srt_path: str) -> None:
+def _build_subtitle_file(timings: list[VerseTiming], srt_path: str) -> None:
     """Write an SRT subtitle file from *timings* to *srt_path*.
 
     Each entry shows the Arabic verse text on the first line and the English
@@ -274,7 +274,7 @@ def _ms_to_srt_time(ms: int) -> str:
 def compute_verse_timings(
     audio_files: list[str],
     verse_texts: list[tuple[str, str]],
-    verse_segments: list[list] | None = None,
+    verse_segments: list[list[list[int]]] | None = None,
 ) -> list[VerseTiming]:
     """Compute per-verse start/end times for the concatenated audio.
 

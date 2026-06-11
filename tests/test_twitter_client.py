@@ -200,16 +200,18 @@ class TestUploadVideo:
 # ------------------------------------------------------------------ #
 
 class TestFormatTweet:
-    def test_short_verse_unchanged(self):
+    def test_short_verse_returns_single_tweet(self):
         result = twitter_client._format_tweet("Hello", "Al-Fatiha", 1, 280)
-        assert result == '"Hello" {Al-Fatiha:1}'
+        assert result == ['"Hello" {Al-Fatiha:1}']
 
-    def test_long_verse_truncated(self):
+    def test_long_verse_splits_into_multiple_tweets(self):
         long_text = "A" * 300
         result = twitter_client._format_tweet(long_text, "Al-Baqarah", 5, 280)
-        assert len(result) <= 280
-        assert result.endswith("{Al-Baqarah:5}")
+        assert isinstance(result, list)
+        assert len(result) > 1
+        assert all(len(t) <= 280 for t in result)
+        assert result[-1].endswith("{Al-Baqarah:5}")
 
-    def test_attribution_always_present(self):
+    def test_attribution_always_on_last_tweet(self):
         result = twitter_client._format_tweet("short", "Al-Nas", 6, 40)
-        assert "{Al-Nas:6}" in result
+        assert any("{Al-Nas:6}" in t for t in result)
