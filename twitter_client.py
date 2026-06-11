@@ -114,14 +114,31 @@ def post_thread(
 
 
 def _format_tweet(
-    text: str, chapter_name: str, verse_number: "int | str", max_length: int
-) -> str:
-    """Format verse text with attribution, truncating if needed."""
+    text: str, chapter_name: str, verse_number: int | str, max_length: int
+) -> list[str]:
+    """Format verse text with attribution, splitting into multiple tweets if needed.
+
+    The attribution suffix ``{chapter_name:verse_number}`` is appended to the
+    *last* tweet only.  If the full quoted text fits within *max_length* it is
+    returned as a single-element list; otherwise the text is split on word
+    boundaries so every tweet stays within *max_length*.
+    """
     attribution = f" {{{chapter_name}:{verse_number}}}"
-    body = f'"{text}"'
-    full = body + attribution
-    if len(full) <= max_length:
-        return full
-    # Truncate body to fit attribution + ellipsis
-    truncated_body = body[: max_length - len(attribution) - 4] + "…\""
-    return truncated_body + attribution
+    # Characters available for the inner text (excluding surrounding "…" quotes)
+    last_budget = max_length - 2 - len(attribution)
+    mid_budget = max_length - 2
+
+    if len(text) <= last_budget:
+        return [f'"{text}"' + attribution]
+
+    tweets: list[str] = []
+    remaining = text
+    while len(remaining) > last_budget:
+        split_at = remaining.rfind(" ", 0, mid_budget + 1)
+        if split_at <= 0:
+            split_at = mid_budget
+        tweets.append(f'"{remaining[:split_at]}"')
+        remaining = remaining[split_at:].lstrip()
+
+    tweets.append(f'"{remaining}"' + attribution)
+    return tweets

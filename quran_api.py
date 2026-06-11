@@ -165,7 +165,7 @@ def get_verses_by_ruku(
 def _get_verse_audio(
     chapter_number: int,
     verse_number: int,
-    recitation_id: int = 7,
+    recitation_id: int = 1,
 ) -> dict:
     """Return ``{"url": str, "segments": list}`` for a single verse's recitation.
 
