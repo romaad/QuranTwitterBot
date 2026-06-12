@@ -1,3 +1,5 @@
+import textwrap
+import math
 """
 Video production module.
 
@@ -210,7 +212,7 @@ def build_video(
         srt_path: str | None = None
         if verse_texts:
             timings = compute_verse_timings(audio_files, verse_texts, verse_segments)
-            srt_path = os.path.join(work_dir, "subs.srt")
+            srt_path = os.path.join(work_dir, "subs.ass")
             _build_subtitle_file(timings, srt_path)
 
         # ── 5. Overlay audio + apply filters ──────────────────────────── #
@@ -226,7 +228,7 @@ def build_video(
         if srt_path:
             # Escape backslashes and colons for the ffmpeg subtitles filter
             escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:")
-            vf_parts.append(f"subtitles={escaped}")
+            vf_parts.append(f"ass={escaped}:fontsdir=/home/ramadan/.fonts")
 
         overlay_args = [
             *bg_input_args,
@@ -247,28 +249,66 @@ def build_video(
         shutil.rmtree(work_dir, ignore_errors=True)
 
 
-def _build_subtitle_file(timings: list[VerseTiming], srt_path: str) -> None:
-    """Write an SRT subtitle file from *timings* to *srt_path*.
+def _build_subtitle_file(timings: list[VerseTiming], ass_path: str) -> None:
+    """Write an ASS subtitle file from *timings* to *ass_path*."""
+    header = """[Script Info]
+ScriptType: v4.00+
+PlayResX: 1080
+PlayResY: 1920
+WrapStyle: 1
 
-    Each entry shows the Arabic verse text on the first line and the English
-    translation on the second line.
-    """
-    with open(srt_path, "w", encoding="utf-8") as fh:
-        for idx, vt in enumerate(timings, 1):
-            start = _ms_to_srt_time(vt.start_ms)
-            end = _ms_to_srt_time(vt.end_ms)
-            fh.write(f"{idx}\n{start} --> {end}\n{vt.arabic}\n{vt.english}\n\n")
+[V4+ Styles]
+Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
+Style: Arabic,DigitalKhatt New Madina,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1.5,0,8,40,40,650,1
+Style: English,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,0,8,40,40,500,1
+
+[Events]
+Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
+"""
+    with open(ass_path, "w", encoding="utf-8") as fh:
+        fh.write(header)
+        for vt in timings:
+            duration_ms = vt.end_ms - vt.start_ms
+            
+            # Split long verses into chunks (around 6-8 words max per chunk for Arabic)
+            arabic_words = vt.arabic.split()
+            english_words = vt.english.split()
+            
+            # Use smaller chunks for Arabic (max 8 words)
+            num_chunks = max(1, math.ceil(len(arabic_words) / 8))
+            
+            chunk_duration = duration_ms // num_chunks
+            
+            arabic_chunk_size = math.ceil(len(arabic_words) / num_chunks)
+            english_chunk_size = math.ceil(len(english_words) / num_chunks)
+            
+            for i in range(num_chunks):
+                chunk_start = vt.start_ms + i * chunk_duration
+                chunk_end = vt.start_ms + (i + 1) * chunk_duration if i < num_chunks - 1 else vt.end_ms
+                
+                start_str = _ms_to_ass_time(chunk_start)
+                end_str = _ms_to_ass_time(chunk_end)
+                
+                ar_chunk = " ".join(arabic_words[i * arabic_chunk_size : (i + 1) * arabic_chunk_size])
+                en_chunk = " ".join(english_words[i * english_chunk_size : (i + 1) * english_chunk_size])
+                
+                # We can add explicit line breaks using ASS \N tag
+                ar_wrapped = "\\N".join(textwrap.wrap(ar_chunk, width=30))
+                en_wrapped = "\\N".join(textwrap.wrap(en_chunk, width=45))
+                
+                fh.write(f"Dialogue: 0,{start_str},{end_str},Arabic,,0,0,0,,{ar_wrapped}\n")
+                fh.write(f"Dialogue: 0,{start_str},{end_str},English,,0,0,0,,{en_wrapped}\n")
 
 
-def _ms_to_srt_time(ms: int) -> str:
-    """Convert milliseconds to SRT timestamp ``HH:MM:SS,mmm``."""
+def _ms_to_ass_time(ms: int) -> str:
+    """Convert milliseconds to ASS timestamp ``H:MM:SS.cc``."""
     h = ms // 3_600_000
     ms %= 3_600_000
     m = ms // 60_000
     ms %= 60_000
     s = ms // 1_000
-    ms %= 1_000
-    return f"{h:02d}:{m:02d}:{s:02d},{ms:03d}"
+    cs = (ms % 1_000) // 10
+    return f"{h}:{m:02d}:{s:02d}.{cs:02d}"
 
 
 def compute_verse_timings(
@@ -324,3 +364,60 @@ def _run_ffmpeg(args: list[str]) -> None:
         raise subprocess.CalledProcessError(
             result.returncode, cmd, result.stdout, result.stderr
         )
+
+if __name__ == "__main__":
+    import os
+    import sys
+    from secrets import Secrets
+    from dotenv import load_dotenv
+    load_dotenv()
+    from config import config
+    from quran_api import get_verses_by_ruku
+    from pexels import PexelsClient
+    import logging
+    
+    logging.basicConfig(level=logging.DEBUG)
+
+    # We just want to build a small example video. Let's grab ruku 1 (Al-Fatihah)
+    print("Fetching verses for Ruku 1...")
+    verses = get_verses_by_ruku(1)
+    
+    # We only take the first two verses to make it quick
+    verses = verses[:2]
+    
+    # Fallback to get PEXELS_API_KEY from env if Secrets.from_env() fails due to missing Twitter keys
+    pexels_key = os.environ.get('PEXELS_API_KEY')
+    if not pexels_key:
+        print("PEXELS_API_KEY is not set. Please add it to .env")
+        sys.exit(1)
+        
+    # config is already imported
+    
+    client = PexelsClient(pexels_key)
+    
+    example_dir = os.path.join(os.getcwd(), "example_output")
+    os.makedirs(example_dir, exist_ok=True)
+    
+    bg_video_path = os.path.join(example_dir, "nature_bg.mp4")
+    print(f"Fetching background video to {bg_video_path}...")
+    client.fetch_video("nature", bg_video_path)
+    
+    audio_urls = [v.audio_url for v in verses]
+    verse_texts = [(v.arabic, v.english) for v in verses]
+    verse_segments = [v.audio_segments for v in verses]
+    
+    output_video = os.path.join(example_dir, "example_video.mp4")
+    print(f"Building example video at {output_video}...")
+    
+    build_video(
+        audio_urls=audio_urls,
+        nature_video_paths=[bg_video_path],
+        output_path=output_video,
+        width=config.video_width,
+        height=config.video_height,
+        darken=config.video_darken,
+        verse_texts=verse_texts,
+        verse_segments=verse_segments
+    )
+    
+    print(f"Example video successfully created at {output_video}")

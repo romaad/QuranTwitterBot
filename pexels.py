@@ -51,6 +51,7 @@ class PexelsClient:
             "query": query,
             "orientation": orientation,
             "per_page": per_page,
+            "page": random.randint(1, 10), # Randomize the page to get a bigger variety
             "humans": 0,
         }
         response = requests.get(

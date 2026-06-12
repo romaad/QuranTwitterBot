@@ -59,7 +59,11 @@ class BotConfig:
     video_height: int = 1920
 
     # How much to darken the background video (0.0 = no darkening, 1.0 = black).
+    # How much to darken the background video (0.0 = no darkening, 1.0 = black).
     video_darken: float = 0.15
+
+    # Number of Arabic characters per subtitle screen chunk.
+    subtitle_chunk_size: int = 85
 
     # ------------------------------------------------------------------ #
     # SQLite path                                                          #
