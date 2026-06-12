@@ -38,10 +38,10 @@ class BotConfig:
     # ------------------------------------------------------------------ #
     # Video posts                                                          #
     # ------------------------------------------------------------------ #
-    enable_video: bool = False
+    enable_video: bool = True
 
     # Recitation ID used with the quran.com v4 API.
-    # 7 = Abdul Basit Abdul Samad (Murattal)
+    # 7 = Mashary
     recitation_id: int = 7
 
     # Path to the background nature video file.
