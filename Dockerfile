@@ -14,4 +14,4 @@ COPY . .
 # Data directory for SQLite persistence — mount a volume here
 RUN mkdir -p /app/data
 
-CMD ["python", "bot.py"]
+CMD ["python", "main.py", "bot"]

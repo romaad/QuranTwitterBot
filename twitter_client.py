@@ -5,6 +5,7 @@ Credentials are loaded via :class:`secrets.Secrets` which reads the
 ``API_KEY``, ``API_SECRET``, ``ACCESS_TOKEN``, and ``ACCESS_TOKEN_SECRET``
 environment variables.
 """
+
 from dataclasses import dataclass
 from typing import Optional
 
@@ -13,6 +14,29 @@ import tweepy
 from secrets import Secrets
 
 MAX_TWEET_LENGTH = 280
+
+
+def _require_twitter_credentials(secrets: Secrets) -> tuple[str, str, str, str]:
+    """Return required Twitter credentials or raise a clear error."""
+    missing: list[str] = []
+    if not secrets.twitter_api_key:
+        missing.append("API_KEY")
+    if not secrets.twitter_api_secret:
+        missing.append("API_SECRET")
+    if not secrets.twitter_access_token:
+        missing.append("ACCESS_TOKEN")
+    if not secrets.twitter_access_token_secret:
+        missing.append("ACCESS_TOKEN_SECRET")
+
+    if missing:
+        raise ValueError("Missing required Twitter credentials: " + ", ".join(missing))
+
+    return (
+        secrets.twitter_api_key,
+        secrets.twitter_api_secret,
+        secrets.twitter_access_token,
+        secrets.twitter_access_token_secret,
+    )
 
 
 @dataclass
@@ -35,11 +59,14 @@ class Tweet:
 def _make_client(secrets: Secrets | None = None) -> tweepy.Client:
     if secrets is None:
         secrets = Secrets.from_env()
+    api_key, api_secret, access_token, access_token_secret = (
+        _require_twitter_credentials(secrets)
+    )
     return tweepy.Client(
-        consumer_key=secrets.twitter_api_key,
-        consumer_secret=secrets.twitter_api_secret,
-        access_token=secrets.twitter_access_token,
-        access_token_secret=secrets.twitter_access_token_secret,
+        consumer_key=api_key,
+        consumer_secret=api_secret,
+        access_token=access_token,
+        access_token_secret=access_token_secret,
     )
 
 
@@ -47,11 +74,14 @@ def _make_api(secrets: Secrets | None = None) -> tweepy.API:
     """Create a tweepy v1.1 API client used for media (video) upload."""
     if secrets is None:
         secrets = Secrets.from_env()
+    api_key, api_secret, access_token, access_token_secret = (
+        _require_twitter_credentials(secrets)
+    )
     auth = tweepy.OAuth1UserHandler(
-        secrets.twitter_api_key,
-        secrets.twitter_api_secret,
-        secrets.twitter_access_token,
-        secrets.twitter_access_token_secret,
+        api_key,
+        api_secret,
+        access_token,
+        access_token_secret,
     )
     return tweepy.API(auth)
 

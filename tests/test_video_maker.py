@@ -1,10 +1,13 @@
 """Unit tests for video_maker.py (ffmpeg and network calls mocked)."""
+
+import os
 import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import video_maker
+from video_maker import VerseTiming, _build_subtitle_file
 
 
 class TestDownloadAudio:
@@ -86,7 +89,6 @@ class TestBuildVideo:
                 str(tmp_path / "out.mp4"),
             )
 
-        import os
         for d in created_dirs:
             assert not os.path.exists(d), f"Temp dir not cleaned up: {d}"
 
@@ -118,7 +120,6 @@ class TestBuildVideo:
                 str(tmp_path / "out.mp4"),
             )
 
-        import os
         for d in created_dirs:
             assert not os.path.exists(d), f"Temp dir not cleaned up: {d}"
 
@@ -224,7 +225,7 @@ class TestBuildVideo:
         overlay_args = mock_ffmpeg.call_args_list[1][0][0]
         assert "-vf" in overlay_args
         vf_value = overlay_args[overlay_args.index("-vf") + 1]
-        assert "subtitles" in vf_value
+        assert "ass=" in vf_value
 
 
 class TestComputeVerseTimings:
@@ -276,16 +277,18 @@ class TestComputeVerseTimings:
         assert timings[0].start_ms == 0
         assert timings[0].end_ms == 2000
         assert timings[1].start_ms == 2000  # offset by duration of first verse
-        assert timings[1].end_ms == 5000   # 2000 + 3000
+        assert timings[1].end_ms == 5000  # 2000 + 3000
 
 
 class TestBuildSubtitleFile:
     def test_creates_srt_file(self, tmp_path):
-        from video_maker import VerseTiming, _build_subtitle_file
-
         timings = [
-            VerseTiming(arabic="بسم الله", english="In the name", start_ms=0, end_ms=2000),
-            VerseTiming(arabic="الحمد", english="All praise", start_ms=2000, end_ms=5000),
+            VerseTiming(
+                arabic="بسم الله", english="In the name", start_ms=0, end_ms=2000
+            ),
+            VerseTiming(
+                arabic="الحمد", english="All praise", start_ms=2000, end_ms=5000
+            ),
         ]
         srt_path = str(tmp_path / "subs.srt")
         _build_subtitle_file(timings, srt_path)
@@ -296,11 +299,10 @@ class TestBuildSubtitleFile:
         assert "بسم الله" in content
         assert "In the name" in content
         assert "الحمد" in content
-        assert "00:00:00,000 --> 00:00:02,000" in content
+        assert "[Script Info]" in content
+        assert "Dialogue: 0,0:00:00.00,0:00:02.00,Arabic" in content
 
     def test_srt_sequence_numbers(self, tmp_path):
-        from video_maker import VerseTiming, _build_subtitle_file
-
         timings = [
             VerseTiming(arabic="A", english="a", start_ms=0, end_ms=1000),
             VerseTiming(arabic="B", english="b", start_ms=1000, end_ms=2000),
@@ -310,10 +312,7 @@ class TestBuildSubtitleFile:
 
         with open(srt_path) as fh:
             content = fh.read()
-        # SRT sequence numbers appear as standalone lines
-        lines = content.splitlines()
-        assert "1" in lines
-        assert "2" in lines
+        assert content.count("Dialogue:") >= 2
 
 
 class TestBuildVideoMultiClip:
@@ -333,9 +332,11 @@ class TestBuildVideoMultiClip:
         with (
             patch("video_maker.requests.get", return_value=mock_response),
             patch("video_maker._run_ffmpeg") as mock_ffmpeg,
-            patch("video_maker._get_audio_duration", return_value=60.0),
+            patch("video_maker._get_audio_duration", side_effect=[60.0, 20.0, 20.0]),
         ):
-            video_maker.build_video(["https://cdn.example.com/v1.mp3"], [clip1, clip2], output)
+            video_maker.build_video(
+                ["https://cdn.example.com/v1.mp3"], [clip1, clip2], output
+            )
 
         assert mock_ffmpeg.call_count == 3
         xfade_args = mock_ffmpeg.call_args_list[1][0][0]
@@ -356,9 +357,11 @@ class TestBuildVideoMultiClip:
         with (
             patch("video_maker.requests.get", return_value=mock_response),
             patch("video_maker._run_ffmpeg") as mock_ffmpeg,
-            patch("video_maker._get_audio_duration", return_value=30.0),
+            patch("video_maker._get_audio_duration", side_effect=[30.0, 15.0, 15.0]),
         ):
-            video_maker.build_video(["https://cdn.example.com/v1.mp3"], [clip1, clip2], output)
+            video_maker.build_video(
+                ["https://cdn.example.com/v1.mp3"], [clip1, clip2], output
+            )
 
         xfade_args = mock_ffmpeg.call_args_list[1][0][0]
         assert clip1 in xfade_args

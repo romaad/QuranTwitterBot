@@ -1,5 +1,7 @@
 import textwrap
 import math
+import importlib.util
+
 """
 Video production module.
 
@@ -24,9 +26,24 @@ import os
 import shutil
 import subprocess
 import tempfile
+import time
 from dataclasses import dataclass
+from typing import Any, cast
 
 import requests
+from config import config
+from pexels import PexelsClient
+from quran_api import get_verses_by_ruku
+
+_SECRETS_SPEC = importlib.util.spec_from_file_location(
+    "quranbot_secrets",
+    os.path.join(os.path.dirname(__file__), "secrets.py"),
+)
+if _SECRETS_SPEC is None or _SECRETS_SPEC.loader is None:
+    raise ImportError("Unable to load local secrets.py")
+_SECRETS_MODULE = importlib.util.module_from_spec(_SECRETS_SPEC)
+_SECRETS_SPEC.loader.exec_module(_SECRETS_MODULE)
+Secrets = cast(Any, _SECRETS_MODULE).Secrets
 
 log = logging.getLogger(__name__)
 
@@ -37,8 +54,8 @@ class VerseTiming:
 
     arabic: str
     english: str
-    start_ms: int   # milliseconds from the start of the combined audio
-    end_ms: int     # exclusive end time in milliseconds
+    start_ms: int  # milliseconds from the start of the combined audio
+    end_ms: int  # exclusive end time in milliseconds
 
 
 def download_audio(url: str, dest_path: str) -> None:
@@ -53,9 +70,13 @@ def _get_audio_duration(path: str) -> float:
     """Return the duration of a media file in seconds using ffprobe."""
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
-            "-show_entries", "format=duration",
-            "-of", "default=noprint_wrappers=1:nokey=1",
+            "ffprobe",
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "default=noprint_wrappers=1:nokey=1",
             path,
         ],
         capture_output=True,
@@ -74,58 +95,98 @@ def _build_xfade_background(
     Concatenate *paths* with cross-fade transitions to produce a single
     background clip of exactly *total_duration* seconds.
 
-    Each source clip is looped if it is shorter than its share of the
-    target duration.  The resulting file is written to *work_dir* and its
+    Each source clip keeps its natural duration (no loop/forced equal split).
+    Clips are consumed in order until the target timeline is filled; extra
+    clips may be unused.  The resulting file is written to *work_dir* and its
     path is returned.
     """
     n = len(paths)
+    target_w = config.video_width if config.video_width > 0 else 1080
+    target_h = config.video_height if config.video_height > 0 else 1920
+    log.info("Building xfade background from %d clip(s)", n)
+
     # Keep the fade short relative to per-clip time to avoid artefacts
     fade_dur = min(1.0, total_duration / max(n * 4, 1))
-    # Per-clip duration: each clip must fill an equal share of the timeline;
-    # the fades overlap so we add (n-1)*fade_dur back to the total.
-    clip_dur = (total_duration + fade_dur * (n - 1)) / n
 
-    # Inputs: loop each source clip long enough to guarantee sufficient frames
+    clip_durations = [max(0.1, _get_audio_duration(p)) for p in paths]
+    selected_paths: list[str] = []
+    selected_durations: list[float] = []
+    timeline = 0.0
+    for p, d in zip(paths, clip_durations):
+        if not selected_paths:
+            timeline = d
+        else:
+            timeline += d - fade_dur
+        selected_paths.append(p)
+        selected_durations.append(d)
+        if timeline >= total_duration:
+            break
+
+    # Inputs: use selected clips at full natural duration
     cmd: list[str] = []
-    for p in paths:
-        cmd += ["-stream_loop", "-1", "-t", f"{clip_dur + 1:.3f}", "-i", p]
+    for p in selected_paths:
+        cmd += ["-i", p]
 
-    # filter_complex: trim+reset PTS per clip, then chain xfade filters
+    # filter_complex: normalize per clip, then chain xfade filters
     filters: list[str] = []
-    for i in range(n):
-        filters.append(f"[{i}:v]trim=0:{clip_dur:.3f},setpts=PTS-STARTPTS[cv{i}]")
+    for i in range(len(selected_paths)):
+        # xfade requires all streams to share size/fps/SAR/pixel format.
+        filters.append(
+            f"[{i}:v]"
+            f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
+            f"crop={target_w}:{target_h},"
+            f"fps=30,format=yuv420p,setsar=1,"
+            f"setpts=PTS-STARTPTS"
+            f"[cv{i}]"
+        )
 
     prev = "cv0"
-    for i in range(1, n):
-        offset = clip_dur * i - fade_dur * i
+    running_duration = selected_durations[0]
+    for i in range(1, len(selected_paths)):
+        offset = max(0.0, running_duration - fade_dur)
         out = f"xfv{i}"
         filters.append(
             f"[{prev}][cv{i}]xfade=transition=fade:duration={fade_dur:.3f}:"
             f"offset={offset:.3f}[{out}]"
         )
         prev = out
+        running_duration = running_duration + selected_durations[i] - fade_dur
 
     bg_path = os.path.join(work_dir, "background.mp4")
-    _run_ffmpeg([
-        *cmd,
-        "-filter_complex", ";".join(filters),
-        "-map", f"[{prev}]",
-        "-t", f"{total_duration:.3f}",
-        "-c:v", "libx264", "-preset", "fast",
-        bg_path,
-    ])
+    _run_ffmpeg(
+        [
+            *cmd,
+            "-filter_complex",
+            ";".join(filters),
+            "-map",
+            f"[{prev}]",
+            "-t",
+            f"{total_duration:.3f}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "fast",
+            bg_path,
+        ],
+        step_name="build-xfade-background",
+    )
     return bg_path
 
 
 def build_video(
-    audio_urls: list[str],
-    nature_video_paths: list[str] | str,
-    output_path: str,
+    audio_urls: list[str] | None = None,
+    nature_video_paths: list[str] | str | None = None,
+    output_path: str | None = None,
     width: int = 0,
     height: int = 0,
     darken: float = 0.15,
     verse_texts: list[tuple[str, str]] | None = None,
     verse_segments: list[list[list[int]]] | None = None,
+    *,
+    ruku_number: int | None = None,
+    verse_limit: int | None = None,
+    output_dir: str | None = None,
+    pexels_query: str | None = None,
 ) -> str:
     """
     Produce a video by combining verse audio with one or more nature clips.
@@ -167,8 +228,25 @@ def build_video(
     Raises ``ValueError`` if *audio_urls* is empty.
     Raises ``subprocess.CalledProcessError`` if ffmpeg fails.
     """
+    if ruku_number is not None:
+        return _build_video_from_ruku(
+            ruku_number=ruku_number,
+            output_path=output_path,
+            nature_video_paths=nature_video_paths,
+            width=width,
+            height=height,
+            darken=darken,
+            verse_limit=verse_limit,
+            output_dir=output_dir,
+            pexels_query=pexels_query,
+        )
+
     if not audio_urls:
         raise ValueError("audio_urls must not be empty")
+    if nature_video_paths is None:
+        raise ValueError("nature_video_paths must be provided")
+    if output_path is None:
+        raise ValueError("output_path must be provided")
 
     if isinstance(nature_video_paths, str):
         nature_video_paths = [nature_video_paths]
@@ -190,17 +268,27 @@ def build_video(
                 fh.write(f"file '{path}'\n")
 
         combined_audio = os.path.join(work_dir, "combined.mp3")
-        _run_ffmpeg([
-            "-f", "concat", "-safe", "0",
-            "-i", concat_list,
-            "-c", "copy",
-            combined_audio,
-        ])
+        _run_ffmpeg(
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                concat_list,
+                "-c",
+                "copy",
+                combined_audio,
+            ],
+            step_name="concat-audio",
+        )
 
         # ── 3. Build background video ─────────────────────────────────── #
         if len(nature_video_paths) > 1:
             audio_duration = _get_audio_duration(combined_audio)
-            bg_path = _build_xfade_background(nature_video_paths, audio_duration, work_dir)
+            bg_path = _build_xfade_background(
+                nature_video_paths, audio_duration, work_dir
+            )
             bg_input_args = ["-i", bg_path]
             shortest_flag: list[str] = []
         else:
@@ -232,21 +320,110 @@ def build_video(
 
         overlay_args = [
             *bg_input_args,
-            "-i", combined_audio,
+            "-i",
+            combined_audio,
             *shortest_flag,
-            "-map", "0:v:0", "-map", "1:a:0",
+            "-map",
+            "0:v:0",
+            "-map",
+            "1:a:0",
         ]
         if vf_parts:
-            overlay_args += ["-vf", ",".join(vf_parts), "-c:v", "libx264", "-c:a", "aac"]
+            overlay_args += [
+                "-vf",
+                ",".join(vf_parts),
+                "-c:v",
+                "libx264",
+                "-c:a",
+                "aac",
+            ]
         else:
             overlay_args += ["-c:v", "copy", "-c:a", "aac"]
         overlay_args.append(output_path)
-        _run_ffmpeg(overlay_args)
+        _run_ffmpeg(overlay_args, step_name="overlay-audio-video")
 
         log.info("Video produced: %s", output_path)
         return output_path
     finally:
         shutil.rmtree(work_dir, ignore_errors=True)
+
+
+def _build_video_from_ruku(
+    ruku_number: int,
+    output_path: str | None,
+    nature_video_paths: list[str] | str | None,
+    width: int,
+    height: int,
+    darken: float,
+    verse_limit: int | None,
+    output_dir: str | None,
+    pexels_query: str | None,
+) -> str:
+    """Build a video directly from a ruku number."""
+    log.info("Fetching verses for ruku %d", ruku_number)
+    verses = get_verses_by_ruku(
+        ruku_number,
+        config.translation_id,
+        config.recitation_id,
+    )
+    if verse_limit is not None:
+        verses = verses[:verse_limit]
+    if not verses:
+        raise ValueError(f"No verses found for ruku {ruku_number}")
+
+    if output_path is None:
+        if output_dir is None:
+            output_dir = os.path.join(os.getcwd(), "example_output")
+        os.makedirs(output_dir, exist_ok=True)
+        output_path = os.path.join(output_dir, "example_video.mp4")
+
+    if nature_video_paths is None:
+        pexels_key = Secrets.from_env().pexels_api_key
+        if not pexels_key:
+            raise ValueError(
+                "Set PEXELS_API_KEY or provide nature_video_paths when building from ruku"
+            )
+        queries = config.nature_video_queries
+
+        with tempfile.TemporaryDirectory(prefix="quran_example_bg_") as bg_dir:
+            bg_video_paths: list[str] = []
+            for i, _ in enumerate(verses):
+                query = pexels_query or queries[i % len(queries)]
+                bg_video_path = os.path.join(bg_dir, f"nature_bg_{i:03d}.mp4")
+                log.info(
+                    "Fetching background video %d/%d to %s",
+                    i + 1,
+                    len(verses),
+                    bg_video_path,
+                )
+                PexelsClient(pexels_key).fetch_video(query, bg_video_path)
+                bg_video_paths.append(bg_video_path)
+
+            return build_video(
+                audio_urls=[v.audio_url for v in verses],
+                nature_video_paths=bg_video_paths,
+                output_path=output_path,
+                width=width if width > 0 else config.video_width,
+                height=height if height > 0 else config.video_height,
+                darken=darken if darken != 0.15 else config.video_darken,
+                verse_texts=[(v.arabic, v.english) for v in verses],
+                verse_segments=[
+                    cast(list[list[int]], cast(Any, v).audio_segments) for v in verses
+                ],
+            )
+
+    return build_video(
+        audio_urls=[v.audio_url for v in verses],
+        nature_video_paths=nature_video_paths,
+        output_path=output_path,
+        width=width if width > 0 else config.video_width,
+        height=height if height > 0 else config.video_height,
+        darken=darken if darken != 0.15 else config.video_darken,
+        verse_texts=[(v.arabic, v.english) for v in verses],
+        verse_segments=[
+            cast(list[list[int]], cast(Any, v).audio_segments) for v in verses
+        ],
+    )
 
 
 def _build_subtitle_file(timings: list[VerseTiming], ass_path: str) -> None:
@@ -259,45 +436,99 @@ WrapStyle: 1
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Arabic,DigitalKhatt New Madina,40,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1.5,0,8,40,40,650,1
-Style: English,Arial,20,&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,0,8,40,40,500,1
+Style: Arabic,DigitalKhatt New Madina,{arabic_font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1.5,0,2,40,40,{arabic_margin_v},1
+Style: English,Arial,{english_font_size},&H00FFFFFF,&H000000FF,&H00000000,&H80000000,0,0,0,0,100,100,0,0,1,1,0,2,40,40,{english_margin_v},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
-"""
+""".format(
+        arabic_font_size=config.subtitle_arabic_font_size,
+        english_font_size=config.subtitle_english_font_size,
+        arabic_margin_v=config.subtitle_arabic_margin_v,
+        english_margin_v=config.subtitle_english_margin_v,
+    )
+
+    usable_width = max(200, config.video_width - (2 * config.subtitle_side_margin))
+    arabic_wrap_chars = max(
+        50,
+        int(usable_width / max(1, config.subtitle_arabic_font_size * 0.85)),
+    )
+    english_wrap_chars = max(
+        50,
+        int(usable_width / max(1, config.subtitle_english_font_size * 0.55)),
+    )
+
     with open(ass_path, "w", encoding="utf-8") as fh:
         fh.write(header)
         for vt in timings:
             duration_ms = vt.end_ms - vt.start_ms
-            
-            # Split long verses into chunks (around 6-8 words max per chunk for Arabic)
+
+            # Split verses into subtitle chunks.
             arabic_words = vt.arabic.split()
             english_words = vt.english.split()
-            
-            # Use smaller chunks for Arabic (max 8 words)
-            num_chunks = max(1, math.ceil(len(arabic_words) / 8))
-            
+
+            # Build Arabic chunks that fit a single subtitle line width.
+            max_arabic_words = max(1, config.subtitle_max_arabic_words)
+            arabic_chunks: list[str] = []
+            i = 0
+            while i < len(arabic_words):
+                chunk_words: list[str] = []
+                chunk_chars = 0
+                while i < len(arabic_words) and len(chunk_words) < max_arabic_words:
+                    next_word = arabic_words[i]
+                    # Estimate width by characters excluding spaces.
+                    next_chars = chunk_chars + len(next_word)
+                    if chunk_words and next_chars > arabic_wrap_chars:
+                        break
+                    chunk_words.append(next_word)
+                    chunk_chars = next_chars
+                    i += 1
+
+                if not chunk_words:
+                    # Ensure forward progress even for a single very long token.
+                    chunk_words = [arabic_words[i]]
+                    i += 1
+
+                arabic_chunks.append(" ".join(chunk_words))
+
+            num_chunks = max(1, len(arabic_chunks))
+
             chunk_duration = duration_ms // num_chunks
-            
-            arabic_chunk_size = math.ceil(len(arabic_words) / num_chunks)
+
             english_chunk_size = math.ceil(len(english_words) / num_chunks)
-            
-            for i in range(num_chunks):
-                chunk_start = vt.start_ms + i * chunk_duration
-                chunk_end = vt.start_ms + (i + 1) * chunk_duration if i < num_chunks - 1 else vt.end_ms
-                
+
+            for chunk_index in range(num_chunks):
+                chunk_start = vt.start_ms + chunk_index * chunk_duration
+                chunk_end = (
+                    vt.start_ms + (chunk_index + 1) * chunk_duration
+                    if chunk_index < num_chunks - 1
+                    else vt.end_ms
+                )
+
                 start_str = _ms_to_ass_time(chunk_start)
                 end_str = _ms_to_ass_time(chunk_end)
-                
-                ar_chunk = " ".join(arabic_words[i * arabic_chunk_size : (i + 1) * arabic_chunk_size])
-                en_chunk = " ".join(english_words[i * english_chunk_size : (i + 1) * english_chunk_size])
-                
-                # We can add explicit line breaks using ASS \N tag
-                ar_wrapped = "\\N".join(textwrap.wrap(ar_chunk, width=30))
-                en_wrapped = "\\N".join(textwrap.wrap(en_chunk, width=45))
-                
-                fh.write(f"Dialogue: 0,{start_str},{end_str},Arabic,,0,0,0,,{ar_wrapped}\n")
-                fh.write(f"Dialogue: 0,{start_str},{end_str},English,,0,0,0,,{en_wrapped}\n")
+
+                ar_chunk = arabic_chunks[chunk_index]
+                en_chunk = " ".join(
+                    english_words[
+                        chunk_index
+                        * english_chunk_size : (chunk_index + 1)
+                        * english_chunk_size
+                    ]
+                )
+
+                # Arabic is intentionally kept on one line; chunks are width-constrained above.
+                ar_wrapped = ar_chunk
+                en_wrapped = "\\N".join(
+                    textwrap.wrap(en_chunk, width=english_wrap_chars)
+                )
+
+                fh.write(
+                    f"Dialogue: 0,{start_str},{end_str},Arabic,,0,0,0,,{ar_wrapped}\n"
+                )
+                fh.write(
+                    f"Dialogue: 0,{start_str},{end_str},English,,0,0,0,,{en_wrapped}\n"
+                )
 
 
 def _ms_to_ass_time(ms: int) -> str:
@@ -335,10 +566,8 @@ def compute_verse_timings(
     """
     timings: list[VerseTiming] = []
     offset_ms = 0
-    for i, (audio_path, (arabic, english)) in enumerate(
-        zip(audio_files, verse_texts)
-    ):
-        segs = (verse_segments[i] if verse_segments and i < len(verse_segments) else [])
+    for i, (audio_path, (arabic, english)) in enumerate(zip(audio_files, verse_texts)):
+        segs = verse_segments[i] if verse_segments and i < len(verse_segments) else []
         if segs:
             duration_ms = max(seg[2] for seg in segs)
         else:
@@ -355,69 +584,22 @@ def compute_verse_timings(
     return timings
 
 
-def _run_ffmpeg(args: list[str]) -> None:
+def _run_ffmpeg(args: list[str], step_name: str = "ffmpeg") -> None:
     """Run ffmpeg with the given argument list, raising on non-zero exit."""
     cmd = ["ffmpeg", "-y"] + args
+    log.info("Starting ffmpeg step: %s", step_name)
     log.debug("ffmpeg command: %s", " ".join(cmd))
+    start = time.monotonic()
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
+        elapsed = time.monotonic() - start
+        log.error("ffmpeg step failed: %s (%.2fs)", step_name, elapsed)
         raise subprocess.CalledProcessError(
             result.returncode, cmd, result.stdout, result.stderr
         )
+    elapsed = time.monotonic() - start
+    log.info("Finished ffmpeg step: %s (%.2fs)", step_name, elapsed)
+
 
 if __name__ == "__main__":
-    import os
-    import sys
-    from secrets import Secrets
-    from dotenv import load_dotenv
-    load_dotenv()
-    from config import config
-    from quran_api import get_verses_by_ruku
-    from pexels import PexelsClient
-    import logging
-    
-    logging.basicConfig(level=logging.DEBUG)
-
-    # We just want to build a small example video. Let's grab ruku 1 (Al-Fatihah)
-    print("Fetching verses for Ruku 1...")
-    verses = get_verses_by_ruku(1)
-    
-    # We only take the first two verses to make it quick
-    verses = verses[:2]
-    
-    # Fallback to get PEXELS_API_KEY from env if Secrets.from_env() fails due to missing Twitter keys
-    pexels_key = os.environ.get('PEXELS_API_KEY')
-    if not pexels_key:
-        print("PEXELS_API_KEY is not set. Please add it to .env")
-        sys.exit(1)
-        
-    # config is already imported
-    
-    client = PexelsClient(pexels_key)
-    
-    example_dir = os.path.join(os.getcwd(), "example_output")
-    os.makedirs(example_dir, exist_ok=True)
-    
-    bg_video_path = os.path.join(example_dir, "nature_bg.mp4")
-    print(f"Fetching background video to {bg_video_path}...")
-    client.fetch_video("nature", bg_video_path)
-    
-    audio_urls = [v.audio_url for v in verses]
-    verse_texts = [(v.arabic, v.english) for v in verses]
-    verse_segments = [v.audio_segments for v in verses]
-    
-    output_video = os.path.join(example_dir, "example_video.mp4")
-    print(f"Building example video at {output_video}...")
-    
-    build_video(
-        audio_urls=audio_urls,
-        nature_video_paths=[bg_video_path],
-        output_path=output_video,
-        width=config.video_width,
-        height=config.video_height,
-        darken=config.video_darken,
-        verse_texts=verse_texts,
-        verse_segments=verse_segments
-    )
-    
-    print(f"Example video successfully created at {output_video}")
+    __import__("main").main()

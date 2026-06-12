@@ -8,6 +8,7 @@ Runs an APScheduler cron job that:
 4. Logs the result to verse_history.
 5. Advances state on success.
 """
+
 import logging
 import os
 import tempfile
@@ -159,7 +160,8 @@ def post_ruku_group(db_path: str = None) -> None:
 
         log.info(
             "Posting ruku group starting at chapter %d, verse %d",
-            chapter_num, verse_num,
+            chapter_num,
+            verse_num,
         )
 
         arabic_text = ""
@@ -193,7 +195,6 @@ def post_ruku_group(db_path: str = None) -> None:
 
             arabic_text = " ".join(v.arabic for v in verses)
             english_text = " ".join(v.english for v in verses)
-            audio_urls = [v.audio_url for v in verses]
 
             first_verse = verses[0]
             last_verse = verses[-1]
@@ -211,28 +212,27 @@ def post_ruku_group(db_path: str = None) -> None:
                 nature_paths = _fetch_background_videos(secrets, tmp_dir)
 
                 video_maker.build_video(
-                    audio_urls,
-                    nature_paths,
-                    output_path,
-                    width=config.video_width,
-                    height=config.video_height,
-                    darken=config.video_darken,
-                    verse_texts=[(v.arabic, v.english) for v in verses],
-                    verse_segments=[v.audio_segments for v in verses],
+                    ruku_number=ruku_number,
+                    nature_video_paths=nature_paths,
+                    output_path=output_path,
                 )
 
                 arabic_tweets = [
                     Tweet(text=t)
                     for t in twitter_client._format_tweet(
-                        arabic_text, chapter_name_ar, verse_label,
-                        config.max_tweet_length
+                        arabic_text,
+                        chapter_name_ar,
+                        verse_label,
+                        config.max_tweet_length,
                     )
                 ]
                 english_tweets = [
                     Tweet(text=t)
                     for t in twitter_client._format_tweet(
-                        english_text, chapter_name_en, verse_label,
-                        config.max_tweet_length
+                        english_text,
+                        chapter_name_en,
+                        verse_label,
+                        config.max_tweet_length,
                     )
                 ]
                 tweet_ids = twitter_client.post_thread(
@@ -270,22 +270,31 @@ def post_ruku_group(db_path: str = None) -> None:
             log.info("State advanced to chapter %d, verse %d", next_ch, next_v)
 
 
-def main() -> None:
-    db_path = config.db_path
+def run_scheduler(
+    db_path: str | None = None,
+    schedule_cron: str | None = None,
+    enable_video: bool | None = None,
+) -> None:
+    """Start the APScheduler loop with optional runtime overrides."""
+    if db_path is None:
+        db_path = config.db_path
+    if schedule_cron is None:
+        schedule_cron = config.schedule_cron
+    if enable_video is None:
+        enable_video = config.enable_video
+
     os.makedirs(os.path.dirname(db_path) or ".", exist_ok=True)
     db.init_db(db_path)
 
     scheduler = BlockingScheduler(timezone="UTC")
-    trigger = CronTrigger.from_crontab(config.schedule_cron)
-    if config.enable_video:
+    trigger = CronTrigger.from_crontab(schedule_cron)
+    if enable_video:
         job = post_ruku_group
     else:
         job = post_verse
     scheduler.add_job(job, trigger)
 
-    log.info(
-        "Scheduler started. Cron: %s  DB: %s", config.schedule_cron, db_path
-    )
+    log.info("Scheduler started. Cron: %s  DB: %s", schedule_cron, db_path)
     try:
         scheduler.start()
     except (KeyboardInterrupt, SystemExit):
@@ -293,4 +302,4 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    main()
+    __import__("main").main()

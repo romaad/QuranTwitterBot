@@ -1,9 +1,11 @@
 """Unit tests for twitter_client.py (tweepy mocked)."""
+
 from unittest.mock import MagicMock
 
 import pytest
 
 import twitter_client
+from secrets import Secrets
 from twitter_client import Tweet
 
 
@@ -16,6 +18,7 @@ def _make_tweet_response(tweet_id: str):
 # ------------------------------------------------------------------ #
 # Tweet dataclass                                                      #
 # ------------------------------------------------------------------ #
+
 
 class TestTweetDataclass:
     def test_text_only_tweet(self):
@@ -51,6 +54,7 @@ class TestTweetDataclass:
 # ------------------------------------------------------------------ #
 # post_thread                                                          #
 # ------------------------------------------------------------------ #
+
 
 class TestPostThread:
     def test_thread_mode_posts_reply(self):
@@ -182,6 +186,7 @@ class TestPostThread:
 # upload_video                                                         #
 # ------------------------------------------------------------------ #
 
+
 class TestUploadVideo:
     def test_returns_media_id_string(self):
         api = MagicMock()
@@ -195,9 +200,34 @@ class TestUploadVideo:
         )
 
 
+class TestCredentialValidation:
+    def test_make_client_raises_when_credentials_missing(self):
+        with pytest.raises(ValueError, match="Missing required Twitter credentials"):
+            twitter_client._make_client(
+                Secrets(
+                    twitter_api_key=None,
+                    twitter_api_secret="secret",
+                    twitter_access_token="token",
+                    twitter_access_token_secret="token_secret",
+                )
+            )
+
+    def test_make_api_raises_when_credentials_missing(self):
+        with pytest.raises(ValueError, match="Missing required Twitter credentials"):
+            twitter_client._make_api(
+                Secrets(
+                    twitter_api_key="key",
+                    twitter_api_secret=None,
+                    twitter_access_token="token",
+                    twitter_access_token_secret="token_secret",
+                )
+            )
+
+
 # ------------------------------------------------------------------ #
 # _format_tweet                                                        #
 # ------------------------------------------------------------------ #
+
 
 class TestFormatTweet:
     def test_short_verse_returns_single_tweet(self):

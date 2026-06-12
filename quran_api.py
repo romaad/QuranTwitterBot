@@ -3,6 +3,8 @@ Quran.com API v4 client.
 
 Docs: https://api.quran.com/api/v4
 """
+
+import re
 from dataclasses import dataclass, field
 
 import requests
@@ -18,7 +20,7 @@ _session.headers.update({"Accept": "application/json"})
 class Verse:
     """Represents a single Quran verse with text and optional audio data."""
 
-    verse_key: str            # e.g. "1:1"
+    verse_key: str  # e.g. "1:1"
     chapter_number: int
     verse_number: int
     arabic: str
@@ -26,7 +28,6 @@ class Verse:
     audio_url: str = ""
     audio_segments: list = field(default_factory=list)
     # audio_segments format: [[word_idx, start_ms, end_ms], ...]
-
 
 
 def get_chapter(chapter_number: int) -> dict:
@@ -48,7 +49,9 @@ def get_chapter(chapter_number: int) -> dict:
     return response.json()["chapter"]
 
 
-def get_verse(chapter_number: int, verse_number: int, translation_id: int = 131) -> dict:
+def get_verse(
+    chapter_number: int, verse_number: int, translation_id: int = 131
+) -> dict:
     """
     Fetch a single verse by chapter + verse number (1-based).
 
@@ -97,7 +100,6 @@ def extract_english(verse: dict) -> str:
 
 def _strip_html(text: str) -> str:
     """Remove simple HTML tags from a string."""
-    import re
     return re.sub(r"<[^>]+>", "", text).strip()
 
 
@@ -155,7 +157,9 @@ def get_verses_by_ruku(
 
     # Enrich each verse with its audio URL and timing segments
     for verse in verses:
-        audio = _get_verse_audio(verse.chapter_number, verse.verse_number, recitation_id)
+        audio = _get_verse_audio(
+            verse.chapter_number, verse.verse_number, recitation_id
+        )
         verse.audio_url = audio["url"]
         verse.audio_segments = audio.get("segments", [])
 
@@ -207,9 +211,7 @@ def get_verses_audio_urls(
 
     Returns a list of fully-qualified HTTPS URLs in the same order.
     """
-    return [
-        get_verse_audio_url(ch, v, recitation_id) for ch, v in positions
-    ]
+    return [get_verse_audio_url(ch, v, recitation_id) for ch, v in positions]
 
 
 def _normalise_audio_url(url: str) -> str:

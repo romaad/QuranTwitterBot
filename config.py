@@ -2,6 +2,7 @@
 Bot configuration. Edit this file to control scheduling and behaviour.
 All settings are plain Python — no extra config file format needed.
 """
+
 from dataclasses import dataclass
 
 
@@ -51,7 +52,13 @@ class BotConfig:
     # One video is fetched per query and they are mixed together with a fade
     # transition.  The PEXELS_API_KEY environment variable must be set to
     # enable auto-fetching; otherwise *nature_video_path* is used.
-    nature_video_queries: tuple = ("nature", "wildlife")
+    nature_video_queries: tuple[str, ...] = (
+        "nature",
+        "nature birds",
+        "nature forest",
+        "nature waterfall",
+        "natural",
+    )
 
     # Output video dimensions for mobile portrait (9:16) aspect ratio.
     # Set both to 0 to skip the crop/scale step.
@@ -61,6 +68,24 @@ class BotConfig:
     # How much to darken the background video (0.0 = no darkening, 1.0 = black).
     # How much to darken the background video (0.0 = no darkening, 1.0 = black).
     video_darken: float = 0.15
+
+    # Arabic subtitle font size used in ASS style configuration.
+    # Previously 40; increased by 50% to 60.
+    subtitle_arabic_font_size: int = 80
+
+    # English subtitle font size used in ASS style configuration.
+    # Doubled from the old value (20 -> 40).
+    subtitle_english_font_size: int = 40
+
+    # Maximum Arabic words per subtitle chunk.
+    subtitle_max_arabic_words: int = 12
+
+    # Bottom margins (in ASS pixels). Lower value means closer to bottom edge.
+    subtitle_arabic_margin_v: int = 220
+    subtitle_english_margin_v: int = 120
+
+    # Side margin used when estimating subtitle wrapping width.
+    subtitle_side_margin: int = 40
 
     # Number of Arabic characters per subtitle screen chunk.
     subtitle_chunk_size: int = 85

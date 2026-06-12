@@ -5,13 +5,18 @@ Unit tests mock both quran_api and twitter_client.
 Integration tests (marked @pytest.mark.integration) hit the real Quran API
 but always mock the X API.
 """
+
+import unittest.mock as mock
 from unittest.mock import MagicMock, patch
 
 import pytest
 
 import bot
 import db
+from config import config as cfg
 import quran_api
+from secrets import Secrets
+from twitter_client import Tweet
 
 # ------------------------------------------------------------------ #
 # Helpers                                                              #
@@ -46,7 +51,6 @@ def _make_verse(ruku_number=1, chapter=1, verse_num=1):
 
 def _patch_quran(chapter=MOCK_CHAPTER, verse=MOCK_VERSE):
     """Return a context manager that patches both quran_api functions."""
-    import unittest.mock as mock
     return mock.patch.multiple(
         "bot.quran_api",
         get_chapter=mock.MagicMock(return_value=chapter),
@@ -61,22 +65,16 @@ def _patch_quran(chapter=MOCK_CHAPTER, verse=MOCK_VERSE):
 
 
 def _patch_twitter(tweet_ids=("111", "222")):
-    import unittest.mock as mock
     return mock.patch("bot.twitter_client.post_thread", return_value=list(tweet_ids))
 
 
 def _patch_ruku_twitter(tweet_ids=("aaa", "bbb", "ccc")):
     """Patch twitter_client.post_thread for ruku (returns 3 IDs)."""
-    import unittest.mock as mock
-    return mock.patch(
-        "bot.twitter_client.post_thread", return_value=list(tweet_ids)
-    )
+    return mock.patch("bot.twitter_client.post_thread", return_value=list(tweet_ids))
 
 
 def _patch_secrets():
     """Patch Secrets.from_env so tests don't need real Twitter credentials."""
-    import unittest.mock as mock
-    from secrets import Secrets
     fake = Secrets(
         twitter_api_key="fake_key",
         twitter_api_secret="fake_secret",
@@ -90,6 +88,7 @@ def _patch_secrets():
 # ------------------------------------------------------------------ #
 # Unit tests                                                           #
 # ------------------------------------------------------------------ #
+
 
 class TestNextPosition:
     def test_increments_verse(self):
@@ -126,7 +125,9 @@ class TestPostVerse:
 
     def test_failure_logs_failed_row(self, tmp_db):
         with _patch_quran():
-            with patch("bot.twitter_client.post_thread", side_effect=Exception("API error")):
+            with patch(
+                "bot.twitter_client.post_thread", side_effect=Exception("API error")
+            ):
                 bot.post_verse(db_path=tmp_db)
 
         with db.get_connection(tmp_db) as conn:
@@ -182,17 +183,16 @@ class TestPostVerse:
 # Integration tests (live Quran API, mocked X API)                    #
 # ------------------------------------------------------------------ #
 
+
 @pytest.mark.integration
 @pytest.mark.usefixtures("patch_quran_url")
 class TestIntegration:
     def test_real_chapter_1_metadata(self):
-        import quran_api
         chapter = quran_api.get_chapter(1)
         assert chapter["verses_count"] == 7
         assert "name_arabic" in chapter
 
     def test_real_verse_1_1(self):
-        import quran_api
         verse = quran_api.get_verse(1, 1)
         arabic = quran_api.extract_arabic(verse)
         english = quran_api.extract_english(verse)
@@ -212,12 +212,10 @@ class TestIntegration:
         assert state["current_verse"] == 2  # advanced from verse 1
 
     def test_real_chapter_2_verse_1(self):
-        import quran_api
         verse = quran_api.get_verse(2, 1)
         assert quran_api.extract_arabic(verse)
 
     def test_real_chapter_3_verse_1(self):
-        import quran_api
         verse = quran_api.get_verse(3, 1)
         assert quran_api.extract_arabic(verse)
 
@@ -226,14 +224,21 @@ class TestIntegration:
 # Tests for post_ruku_group                                            #
 # ------------------------------------------------------------------ #
 
+
 class TestPostRukuGroup:
-    def _build_video_noop(self, audio_urls, nature_video, output_path, **kwargs):
+    def _build_video_noop(self, *args, **kwargs):
+        output_path = kwargs.get("output_path")
+        if output_path is None and len(args) >= 3:
+            output_path = args[2]
+        assert output_path is not None
         with open(output_path, "wb") as fh:
             fh.write(b"FAKEMP4")
         return output_path
 
     def _make_verses(self, count=3):
-        return [_make_verse(ruku_number=1, chapter=1, verse_num=i + 1) for i in range(count)]
+        return [
+            _make_verse(ruku_number=1, chapter=1, verse_num=i + 1) for i in range(count)
+        ]
 
     def test_success_advances_state_to_next_ruku(self, tmp_db, monkeypatch):
         """State must advance past all verses in the ruku on success."""
@@ -303,14 +308,15 @@ class TestPostRukuGroup:
                 fh.write(b"NATURE")
             return dest
 
-        def fake_build(audio_urls, nature_paths, output, **kw):
+        def fake_build(*args, **kw):
+            output = kw.get("output_path")
+            assert output is not None
             with open(output, "wb") as fh:
                 fh.write(b"MP4")
             return output
 
         verses = self._make_verses(1)
 
-        from secrets import Secrets
         pexels_secrets = Secrets(
             twitter_api_key="k",
             twitter_api_secret="s",
@@ -329,7 +335,6 @@ class TestPostRukuGroup:
         ):
             bot.post_ruku_group(db_path=tmp_db)
 
-        from config import config as cfg
         assert fetched_queries == list(cfg.nature_video_queries)
 
     def test_passes_list_of_paths_to_build_video(self, tmp_db, monkeypatch):
@@ -337,8 +342,10 @@ class TestPostRukuGroup:
         monkeypatch.delenv("PEXELS_API_KEY", raising=False)
         captured_paths: list = []
 
-        def fake_build(audio_urls, nature_paths, output, **kw):
-            captured_paths.append(nature_paths)
+        def fake_build(*args, **kw):
+            captured_paths.append(kw.get("nature_video_paths"))
+            output = kw.get("output_path")
+            assert output is not None
             with open(output, "wb") as fh:
                 fh.write(b"MP4")
             return output
@@ -376,7 +383,6 @@ class TestPostRukuGroup:
         ):
             bot.post_ruku_group(db_path=tmp_db)
 
-        from twitter_client import Tweet
         assert len(captured_tweets) == 3
         assert captured_tweets[0].text is not None
         assert captured_tweets[1].text is not None
@@ -384,13 +390,15 @@ class TestPostRukuGroup:
         assert captured_tweets[0].video_path is None
         assert captured_tweets[1].video_path is None
 
-    def test_verse_texts_and_segments_passed_to_build_video(self, tmp_db, monkeypatch):
-        """build_video must receive verse_texts and verse_segments for subtitle overlay."""
+    def test_ruku_number_passed_to_build_video(self, tmp_db, monkeypatch):
+        """build_video must be called using the ruku_number-based API."""
         monkeypatch.delenv("PEXELS_API_KEY", raising=False)
         captured_kwargs: list[dict] = []
 
-        def fake_build(audio_urls, nature_paths, output, **kw):
+        def fake_build(*args, **kw):
             captured_kwargs.append(kw)
+            output = kw.get("output_path")
+            assert output is not None
             with open(output, "wb") as fh:
                 fh.write(b"MP4")
             return output
@@ -407,5 +415,6 @@ class TestPostRukuGroup:
         ):
             bot.post_ruku_group(db_path=tmp_db)
 
-        assert captured_kwargs[0].get("verse_texts") == [(verse.arabic, verse.english)]
-        assert captured_kwargs[0].get("verse_segments") == [verse.audio_segments]
+        assert captured_kwargs[0].get("ruku_number") == 1
+        assert captured_kwargs[0].get("verse_texts") is None
+        assert captured_kwargs[0].get("verse_segments") is None

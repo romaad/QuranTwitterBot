@@ -11,6 +11,7 @@ from urllib.parse import parse_qs, urlparse
 import pytest
 
 import db
+import quran_api
 
 # ------------------------------------------------------------------ #
 # Local mock Quran API server                                         #
@@ -55,7 +56,9 @@ _VERSES = {
         "verse_number": 2,
         "ruku_number": 1,
         "text_uthmani": "ٱلْحَمْدُ لِلَّهِ رَبِّ ٱلْعَـٰلَمِينَ",
-        "translations": [{"id": 131, "text": "All praise is due to Allah, Lord of the worlds."}],
+        "translations": [
+            {"id": 131, "text": "All praise is due to Allah, Lord of the worlds."}
+        ],
     },
     (2, 1): {
         "id": 8,
@@ -132,8 +135,6 @@ def quran_local_server():
 @pytest.fixture()
 def patch_quran_url(quran_local_server):
     """Redirect quran_api to the local mock server for the duration of a test."""
-    import quran_api
-
     original = quran_api.BASE_URL
     quran_api.BASE_URL = f"{quran_local_server}/api/v4"
     yield
