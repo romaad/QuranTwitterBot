@@ -4,11 +4,6 @@ from __future__ import annotations
 
 import argparse
 import logging
-import os
-from dotenv import load_dotenv
-
-load_dotenv()
-
 import bot
 import video_maker
 
