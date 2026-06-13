@@ -126,12 +126,10 @@ def _fetch_background_videos(secrets: Secrets, work_dir: str) -> list[str]:
     """
     if secrets.pexels_api_key:
         client = PexelsClient(secrets.pexels_api_key)
-        paths: list[str] = []
-        for i, query in enumerate(config.nature_video_queries):
-            dest = os.path.join(work_dir, f"nature_bg_{i:02d}.mp4")
-            client.fetch_video(query, dest)
-            paths.append(dest)
-        return paths
+        query = config.nature_video_queries[0] if config.nature_video_queries else "nature"
+        dest = os.path.join(work_dir, f"nature_bg_00.mp4")
+        client.fetch_video(query, dest)
+        return [dest]
     return [config.nature_video_path]
 
 
