@@ -233,6 +233,12 @@ def post_ruku_group(db_path: str = None) -> None:
                         config.max_tweet_length,
                     )
                 ]
+                video_duration = video_maker._get_audio_duration(output_path)
+                if video_duration > 140.0:
+                    log.warning(f"Video duration ({video_duration:.1f}s) exceeds Twitter's 140s limit. Falling back to text-only verse post.")
+                    post_verse(db_path)
+                    return
+                
                 tweet_ids = twitter_client.post_thread(
                     arabic_tweets + english_tweets + [Tweet(video_path=output_path)],
                     mode=config.tweet_mode,
