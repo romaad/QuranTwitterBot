@@ -135,7 +135,7 @@ def _build_xfade_background(
             f"[{i}:v]"
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
             f"crop={target_w}:{target_h},"
-            f"fps=30,format=yuv420p,setsar=1,"
+            f"fps=30,settb=1/30,format=yuv420p,setsar=1,"
             f"setpts=PTS-STARTPTS"
             f"[cv{i}]"
         )
@@ -305,41 +305,54 @@ def build_video(
 
         # ── 5. Overlay audio + apply filters ──────────────────────────── #
         apply_resize = width > 0 and height > 0
-        vf_parts: list[str] = []
+        
+        filter_chains = []
         if apply_resize:
-            vf_parts.append(
-                f"scale={width}:{height}:force_original_aspect_ratio=increase,"
-                f"crop={width}:{height}"
-            )
-        if darken > 0:
-            vf_parts.append(f"eq=brightness=-{darken:.2f}")
-        if srt_path:
-            # Escape backslashes and colons for the ffmpeg subtitles filter
-            escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:")
-            vf_parts.append(f"ass={escaped}:fontsdir=/home/ramadan/.fonts")
-
+            filter_chains.append(f"[0:v]scale={width}:{height}:force_original_aspect_ratio=increase,crop={width}:{height}[bg]")
+        else:
+            filter_chains.append("[0:v]copy[bg]")
+            
         overlay_args = [
             *bg_input_args,
-            "-i",
-            combined_audio,
-            *shortest_flag,
-            "-map",
-            "0:v:0",
-            "-map",
-            "1:a:0",
+            "-i", combined_audio,
         ]
-        if vf_parts:
-            overlay_args += [
-                "-vf",
-                ",".join(vf_parts),
-                "-c:v",
-                "libx264",
-                "-c:a",
-                "aac",
-            ]
-        else:
-            overlay_args += ["-c:v", "copy", "-c:a", "aac"]
-        overlay_args.append(output_path)
+        
+        current_v = "[bg]"
+        
+        if darken > 0:
+            grad_path = os.path.join(work_dir, "gradient.png")
+            # Generate gradient from bottom to middle. Y=H/2 -> alpha=0. Y=H -> alpha=255*darken.
+            # a='max(0, 255*darken*(Y-H/2)/(H/2))'
+            # Note: geq filter parameters need careful quoting, especially the darken float.
+            _run_ffmpeg([
+                "-f", "lavfi",
+                "-i", f"color=black:s={width}x{height},format=rgba",
+                "-vf", f"geq=r=0:g=0:b=0:a='max(0, 200*(Y-H/2)/(H/2))'",
+                "-frames:v", "1",
+                "-y", grad_path
+            ], step_name="generate-gradient")
+            
+            overlay_args += ["-i", grad_path]
+            filter_chains.append(f"{current_v}[2:v]overlay=0:0[bg_dark]")
+            current_v = "[bg_dark]"
+
+        if srt_path:
+            escaped = srt_path.replace("\\", "\\\\").replace(":", "\\:")
+            filter_chains.append(f"{current_v}ass={escaped}:fontsdir=/home/ramadan/.fonts[out_v]")
+            current_v = "[out_v]"
+
+        filter_complex = ";".join(filter_chains)
+
+        overlay_args += [
+            *shortest_flag,
+            "-filter_complex", filter_complex,
+            "-map", current_v,
+            "-map", "1:a:0",
+            "-c:v", "libx264",
+            "-c:a", "aac",
+            output_path
+        ]
+        
         _run_ffmpeg(overlay_args, step_name="overlay-audio-video")
 
         log.info("Video produced: %s", output_path)

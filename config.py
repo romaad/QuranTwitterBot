@@ -12,8 +12,8 @@ class BotConfig:
     # Scheduling                                                           #
     # ------------------------------------------------------------------ #
     # Cron expression: minute hour day-of-month month day-of-week
-    # Default: 7 times a day at 8am, 10am, 12pm, 2pm, 4pm, 6pm, and 8pm UTC
-    schedule_cron: str = "0 8,10,12,14,16,18,20 * * *"
+    # Default: 2 times a day at 8am and 8pm UTC
+    schedule_cron: str = "0 8,20 * * *"
 
     # ------------------------------------------------------------------ #
     # Posting behaviour                                                    #
